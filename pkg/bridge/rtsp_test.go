@@ -1,9 +1,8 @@
-package main
+package bridge
 
 import (
 	"bytes"
 	"encoding/binary"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4audio"
@@ -207,18 +206,6 @@ func TestAudioTimestampForPacketUsesAuthoritativePacketTimestamp(t *testing.T) {
 	}
 	if streamTimestamps.highest != 1234 {
 		t.Fatalf("streamTimestamps.highest = %d, want 1234", streamTimestamps.highest)
-	}
-}
-
-func TestSOAPActionPrefersExactElement(t *testing.T) {
-	t.Parallel()
-
-	req := httptest.NewRequest("POST", "http://example.test/onvif/media_service", nil)
-	body := `<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:trt="http://www.onvif.org/ver10/media/wsdl"><soap:Body><trt:GetProfiles/></soap:Body></soap:Envelope>`
-
-	got := soapAction(req, body, []string{"GetProfile", "GetProfiles"})
-	if got != "GetProfiles" {
-		t.Fatalf("soapAction() = %q, want %q", got, "GetProfiles")
 	}
 }
 

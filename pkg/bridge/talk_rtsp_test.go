@@ -1,4 +1,4 @@
-package main
+package bridge
 
 import (
 	"testing"
@@ -36,7 +36,7 @@ func TestOnDescribeTalkPath(t *testing.T) {
 		t.Fatalf("Start() error = %v", err)
 	}
 	defer server.Close()
-	handler := newRTSPServerHandler()
+	handler := newRTSPServerHandler(NopLogger{})
 	handler.server = server
 	handler.addTalk("office/stream_talk", &rtspTalkPublisher{})
 
@@ -55,7 +55,7 @@ func TestOnDescribeTalkPath(t *testing.T) {
 func TestOnDescribePrefersStreamOverTalkAlias(t *testing.T) {
 	t.Parallel()
 
-	handler := newRTSPServerHandler()
+	handler := newRTSPServerHandler(NopLogger{})
 	playback := newRTSPStreamHandler("office/stream")
 	playback.stream = &gortsplib.ServerStream{}
 	handler.addStream("office/stream", playback)
@@ -76,7 +76,7 @@ func TestOnDescribePrefersStreamOverTalkAlias(t *testing.T) {
 func TestOnPlayUsesStreamWhenTalkAliasExists(t *testing.T) {
 	t.Parallel()
 
-	handler := newRTSPServerHandler()
+	handler := newRTSPServerHandler(NopLogger{})
 	playback := newRTSPStreamHandler("office/stream")
 	handler.addStream("office/stream", playback)
 	handler.addTalkAlias("office/stream", &rtspTalkPublisher{})

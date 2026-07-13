@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -24,8 +25,6 @@ func TestLoadCamerasFromEntries(t *testing.T) {
 		"REOLINK_CAMERA_0_PAUSE_ON_MOTION=true",
 		"REOLINK_CAMERA_0_PAUSE_ON_CLIENT=true",
 		"REOLINK_CAMERA_0_PAUSE_TIMEOUT=3s",
-		"REOLINK_CAMERA_0_IDLE_DISCONNECT=true",
-		"REOLINK_CAMERA_0_IDLE_TIMEOUT=45s",
 		"UNRELATED_KEY=value",
 	})
 	if err != nil {
@@ -66,11 +65,8 @@ func TestLoadCamerasFromEntries(t *testing.T) {
 	if cameras[0].PauseTimeout != 3*time.Second {
 		t.Fatalf("unexpected first camera pause timeout: %v", cameras[0].PauseTimeout)
 	}
-	if !cameras[0].IdleDisconnect {
-		t.Fatal("expected first camera idle_disconnect to be true")
-	}
-	if cameras[0].IdleTimeout != 45*time.Second {
-		t.Fatalf("unexpected first camera idle timeout: %v", cameras[0].IdleTimeout)
+	if !slices.Equal(cameras[0].Streams, []string{"main", "sub"}) {
+		t.Fatalf("unexpected first camera streams: %v", cameras[0].Streams)
 	}
 
 	if cameras[1].Name != "garage" {
@@ -79,33 +75,11 @@ func TestLoadCamerasFromEntries(t *testing.T) {
 	if cameras[1].UID != "9527000000000000" {
 		t.Fatalf("unexpected second camera uid: %q", cameras[1].UID)
 	}
-	if cameras[1].Stream != "main" {
-		t.Fatalf("unexpected second camera default stream: %q", cameras[1].Stream)
+	if !slices.Equal(cameras[1].Streams, []string{"main"}) {
+		t.Fatalf("unexpected second camera default streams: %v", cameras[1].Streams)
 	}
 	if cameras[1].RTSPPath != "garage/stream" {
 		t.Fatalf("unexpected second camera default rtsp path: %q", cameras[1].RTSPPath)
-	}
-	if cameras[1].TalkEncoder != "internal" {
-		t.Fatalf("unexpected second camera default talk encoder: %q", cameras[1].TalkEncoder)
-	}
-}
-
-func TestApplyCameraDefaultsBatteryCameraDoesNotEnableIdleDisconnect(t *testing.T) {
-	t.Parallel()
-
-	camera := CameraConfig{
-		Name:          "front",
-		Host:          "192.168.1.10",
-		BatteryCamera: true,
-	}
-
-	applyCameraDefaults(&camera)
-
-	if camera.IdleDisconnect {
-		t.Fatal("expected battery camera not to enable idle_disconnect automatically")
-	}
-	if camera.IdleTimeout != 30*time.Second {
-		t.Fatalf("unexpected default idle timeout: %v", camera.IdleTimeout)
 	}
 }
 
@@ -135,7 +109,7 @@ func TestLoadCamerasFromEntriesRejectsInvalidTalkProfile(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected validation error")
 	}
-	if !strings.Contains(err.Error(), "talk_profile") {
+	if !strings.Contains(err.Error(), "talk profile") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

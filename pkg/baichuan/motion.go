@@ -3,6 +3,7 @@ package baichuan
 import (
 	"context"
 	"encoding/xml"
+	"strings"
 	"sync"
 )
 
@@ -23,8 +24,28 @@ type AlarmMessage struct {
 	AlarmEventList *AlarmEventList `xml:"AlarmEventList"`
 }
 
-// ListenForMotion subscribes to motion events and invokes the callback when motion is detected.
-func (c *Client) ListenForMotion(ctx context.Context, channel uint8, callback func(bool)) (func(), error) {
+// AlarmState is one decoded alarm update for a channel. Field semantics
+// follow reolink_aio: motion is the "MD" status (or the unclassified "other"
+// AI type on PIR-style cameras), a doorbell press arrives as the "visitor"
+// status.
+type AlarmState struct {
+	// MotionDetected is true while the camera reports motion.
+	MotionDetected bool
+	// Visitor is true while a doorbell press is active.
+	Visitor bool
+	// AITypes lists the active AI classifications, e.g. "people", "vehicle"
+	// or "dog_cat". Empty when none are active.
+	AITypes []string
+}
+
+// Active reports whether any motion or AI detection is currently firing.
+func (s AlarmState) Active() bool {
+	return s.MotionDetected || len(s.AITypes) > 0
+}
+
+// ListenForAlarms subscribes to motion/AI alarm events and invokes the
+// callback with each decoded update for the channel.
+func (c *Client) ListenForAlarms(ctx context.Context, channel uint8, callback func(AlarmState)) (func(), error) {
 	if err := c.Login(ctx); err != nil {
 		return nil, err
 	}
@@ -60,9 +81,9 @@ func (c *Client) ListenForMotion(ctx context.Context, channel uint8, callback fu
 				if msg == nil {
 					continue
 				}
-				motionDetected, matched, err := parseMotionState(msg.XML, channel)
+				state, matched, err := parseAlarmState(msg.XML, channel)
 				if err == nil && matched {
-					callback(motionDetected)
+					callback(state)
 				}
 			}
 		}
@@ -76,30 +97,56 @@ func (c *Client) ListenForMotion(ctx context.Context, channel uint8, callback fu
 	}, nil
 }
 
-func parseMotionState(xmlText string, channel uint8) (bool, bool, error) {
+func parseAlarmState(xmlText string, channel uint8) (AlarmState, bool, error) {
 	if xmlText == "" {
-		return false, false, nil
+		return AlarmState{}, false, nil
 	}
 
 	var payload AlarmMessage
 	if err := xml.Unmarshal([]byte(xmlText), &payload); err != nil {
-		return false, false, err
+		return AlarmState{}, false, err
 	}
 
 	if payload.AlarmEventList == nil {
-		return false, false, nil
+		return AlarmState{}, false, nil
 	}
 
 	for _, ev := range payload.AlarmEventList.AlarmEvents {
 		if ev.ChannelID != channel {
 			continue
 		}
-		if ev.Status != "none" || (ev.AIType != "" && ev.AIType != "none") {
-			return true, true, nil
+		state := AlarmState{
+			MotionDetected: strings.Contains(ev.Status, "MD"),
+			Visitor:        strings.Contains(ev.Status, "visitor"),
+			AITypes:        parseAITypes(ev.AIType),
 		}
-
-		return false, true, nil
+		// PIR-style cameras report unclassified detections as AI type
+		// "other" instead of an MD status.
+		if !state.MotionDetected && strings.Contains(ev.AIType, "other") {
+			state.MotionDetected = true
+		}
+		return state, true, nil
 	}
 
-	return false, false, nil
+	return AlarmState{}, false, nil
+}
+
+// parseAITypes splits the AItype field ("people", "people&vehicle", …) into
+// individual type names, dropping "none" and "other".
+func parseAITypes(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+
+	var out []string
+	for _, part := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == '&' || r == ',' || r == ' '
+	}) {
+		part = strings.ToLower(strings.TrimSpace(part))
+		if part == "" || part == "none" || part == "other" {
+			continue
+		}
+		out = append(out, part)
+	}
+	return out
 }

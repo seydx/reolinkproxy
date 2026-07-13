@@ -1,4 +1,4 @@
-package main
+package bridge
 
 import (
 	"fmt"
@@ -20,6 +20,8 @@ import (
 )
 
 type rtspServerHandler struct {
+	log Logger
+
 	mu      sync.RWMutex
 	streams map[string]*rtspStreamHandler
 	talks   map[string]*rtspTalkPublisher
@@ -27,8 +29,9 @@ type rtspServerHandler struct {
 	server  *gortsplib.Server
 }
 
-func newRTSPServerHandler() *rtspServerHandler {
+func newRTSPServerHandler(log Logger) *rtspServerHandler {
 	return &rtspServerHandler{
+		log:     log,
 		streams: make(map[string]*rtspStreamHandler),
 		talks:   make(map[string]*rtspTalkPublisher),
 		talkSDP: make(map[string]*rtspTalkPublisher),
@@ -64,6 +67,20 @@ func (h *rtspServerHandler) addTalkAlias(path string, talk *rtspTalkPublisher) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.talks[strings.TrimPrefix(path, "/")] = talk
+}
+
+// removePaths drops every stream and talk registration whose path was
+// registered for a removed camera. Active RTSP sessions on those paths keep
+// their ServerStream until they disconnect; new requests get 404.
+func (h *rtspServerHandler) removePaths(paths []string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, path := range paths {
+		path = strings.TrimPrefix(path, "/")
+		delete(h.streams, path)
+		delete(h.talks, path)
+		delete(h.talkSDP, path)
+	}
 }
 
 func (h *rtspServerHandler) getTalk(path string) *rtspTalkPublisher {
@@ -121,9 +138,12 @@ func sessionHasBackChannel(session *gortsplib.ServerSession) bool {
 func (h *rtspServerHandler) OnDescribe(ctx *gortsplib.ServerHandlerOnDescribeCtx) (*base.Response, *gortsplib.ServerStream, error) {
 	stream := h.getStream(ctx.Path)
 	if stream != nil {
+		stream.touchInterest()
+
 		// Wait up to 10 seconds for the stream to become ready (VPS/SPS/PPS extracted)
 		deadline := time.Now().Add(10 * time.Second)
 		for time.Now().Before(deadline) {
+			stream.touchInterest()
 			stream.mu.RLock()
 			readyStream := stream.stream
 			stream.mu.RUnlock()
@@ -142,21 +162,21 @@ func (h *rtspServerHandler) OnDescribe(ctx *gortsplib.ServerHandlerOnDescribeCtx
 			time.Sleep(100 * time.Millisecond)
 		}
 
-		log.Printf("RTSP Client DESCRIBE: path=%s (503 Service Unavailable - not ready)", ctx.Path)
+		h.log.Warnf("RTSP Client DESCRIBE: path=%s (503 Service Unavailable - not ready)", ctx.Path)
 		return &base.Response{StatusCode: base.StatusServiceUnavailable}, nil, fmt.Errorf("stream not ready yet")
 	}
 
 	if talk := h.getTalkSDP(ctx.Path); talk != nil {
 		desc, err := talk.describe(h.server)
 		if err != nil {
-			log.Printf("RTSP Client DESCRIBE: path=%s (400 Bad Request - talk error: %v)", ctx.Path, err)
+			h.log.Warnf("RTSP Client DESCRIBE: path=%s (400 Bad Request - talk error: %v)", ctx.Path, err)
 			return &base.Response{StatusCode: base.StatusBadRequest}, nil, err
 		}
-		log.Printf("RTSP Client DESCRIBE: path=%s (200 OK - talk)", ctx.Path)
+		h.log.Debugf("RTSP Client DESCRIBE: path=%s (200 OK - talk)", ctx.Path)
 		return &base.Response{StatusCode: base.StatusOK}, desc, nil
 	}
 
-	log.Printf("RTSP Client DESCRIBE: path=%s (404 Not Found)", ctx.Path)
+	h.log.Debugf("RTSP Client DESCRIBE: path=%s (404 Not Found)", ctx.Path)
 	return &base.Response{StatusCode: base.StatusNotFound}, nil, nil
 }
 
@@ -165,10 +185,10 @@ func (h *rtspServerHandler) OnSetup(ctx *gortsplib.ServerHandlerOnSetupCtx) (*ba
 		if talk := h.getTalk(ctx.Path); talk != nil {
 			desc, err := talk.describe(h.server)
 			if err != nil {
-				log.Printf("RTSP Client SETUP: path=%s (400 Bad Request - talk error: %v)", ctx.Path, err)
+				h.log.Warnf("RTSP Client SETUP: path=%s (400 Bad Request - talk error: %v)", ctx.Path, err)
 				return &base.Response{StatusCode: base.StatusBadRequest}, nil, err
 			}
-			log.Printf("RTSP Client SETUP: path=%s (200 OK - talk)", ctx.Path)
+			h.log.Debugf("RTSP Client SETUP: path=%s (200 OK - talk)", ctx.Path)
 			return &base.Response{StatusCode: base.StatusOK}, desc, nil
 		}
 	}
@@ -176,10 +196,12 @@ func (h *rtspServerHandler) OnSetup(ctx *gortsplib.ServerHandlerOnSetupCtx) (*ba
 	stream := h.getStream(ctx.Path)
 	if stream != nil {
 		attachSessionToStream(ctx.Session, stream)
+		stream.touchInterest()
 
 		// Wait up to 10 seconds for the stream to become ready (VPS/SPS/PPS extracted)
 		deadline := time.Now().Add(10 * time.Second)
 		for time.Now().Before(deadline) {
+			stream.touchInterest()
 			stream.mu.RLock()
 			readyStream := stream.stream
 			stream.mu.RUnlock()
@@ -205,7 +227,7 @@ func (h *rtspServerHandler) OnSetup(ctx *gortsplib.ServerHandlerOnSetupCtx) (*ba
 		// we should still allow it to fall through to the talk handler
 		// instead of returning 503, because backchannels don't need the video stream to be ready.
 		if h.getTalk(ctx.Path) == nil {
-			log.Printf("RTSP Client SETUP: path=%s (503 Service Unavailable - not ready)", ctx.Path)
+			h.log.Warnf("RTSP Client SETUP: path=%s (503 Service Unavailable - not ready)", ctx.Path)
 			return &base.Response{StatusCode: base.StatusServiceUnavailable}, nil, fmt.Errorf("stream not ready yet")
 		}
 	}
@@ -213,14 +235,14 @@ func (h *rtspServerHandler) OnSetup(ctx *gortsplib.ServerHandlerOnSetupCtx) (*ba
 	if talk := h.getTalk(ctx.Path); talk != nil {
 		desc, err := talk.describe(h.server)
 		if err != nil {
-			log.Printf("RTSP Client SETUP: path=%s (400 Bad Request - talk error: %v)", ctx.Path, err)
+			h.log.Warnf("RTSP Client SETUP: path=%s (400 Bad Request - talk error: %v)", ctx.Path, err)
 			return &base.Response{StatusCode: base.StatusBadRequest}, nil, err
 		}
-		log.Printf("RTSP Client SETUP: path=%s (200 OK - talk fallback)", ctx.Path)
+		h.log.Debugf("RTSP Client SETUP: path=%s (200 OK - talk fallback)", ctx.Path)
 		return &base.Response{StatusCode: base.StatusOK}, desc, nil
 	}
 
-	log.Printf("RTSP Client SETUP: path=%s (404 Not Found)", ctx.Path)
+	h.log.Debugf("RTSP Client SETUP: path=%s (404 Not Found)", ctx.Path)
 	return &base.Response{StatusCode: base.StatusNotFound}, nil, nil
 }
 
@@ -240,14 +262,14 @@ func (h *rtspServerHandler) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base
 	}
 
 	if !state.playing {
-		log.Printf("RTSP Client PLAY: path=%s", ctx.Path)
+		h.log.Debugf("RTSP Client PLAY: path=%s", ctx.Path)
 		state.stream.addClient(ctx.Session)
 		state.playing = true
 	}
 
 	if talk := h.getTalk(ctx.Path); talk != nil && sessionHasBackChannel(ctx.Session) {
 		if err := talk.startBackChannel(ctx.Session, ctx.Path); err != nil {
-			log.Printf("talk %s backchannel unavailable for path %s: %v", talk.cameraName, ctx.Path, err)
+			h.log.Warnf("talk %s backchannel unavailable for path %s: %v", talk.cameraName, ctx.Path, err)
 		}
 	}
 
@@ -277,7 +299,7 @@ func (h *rtspServerHandler) OnPause(ctx *gortsplib.ServerHandlerOnPauseCtx) (*ba
 }
 
 func (h *rtspServerHandler) OnSessionClose(ctx *gortsplib.ServerHandlerOnSessionCloseCtx) {
-	log.Printf("RTSP Client CLOSE: err=%v", ctx.Error)
+	h.log.Debugf("RTSP Client CLOSE: err=%v", ctx.Error)
 	if state, ok := ctx.Session.UserData().(*rtspSessionState); ok && state != nil {
 		if state.stream != nil && state.playing {
 			state.stream.removeClient(ctx.Session)
@@ -285,7 +307,7 @@ func (h *rtspServerHandler) OnSessionClose(ctx *gortsplib.ServerHandlerOnSession
 		}
 		if state.talk != nil {
 			if state.talk.publisher != nil {
-				log.Printf("talk %s rtsp session closed: %v", state.talk.publisher.cameraName, ctx.Error)
+				h.log.Debugf("talk %s rtsp session closed: %v", state.talk.publisher.cameraName, ctx.Error)
 				state.talk.publisher.finish(state.talk)
 			}
 			state.talk.close()
@@ -303,11 +325,12 @@ type rtspStreamHandler struct {
 	server *gortsplib.Server
 	path   string
 
-	mu      sync.RWMutex
-	stream  *gortsplib.ServerStream
-	clients map[*gortsplib.ServerSession]struct{}
-	extras  []*description.Media
-	mirrors []*rtspStreamHandler
+	mu           sync.RWMutex
+	stream       *gortsplib.ServerStream
+	clients      map[*gortsplib.ServerSession]struct{}
+	extras       []*description.Media
+	mirrors      []*rtspStreamHandler
+	lastInterest time.Time
 }
 
 func newRTSPStreamHandler(path string) *rtspStreamHandler {
@@ -379,6 +402,34 @@ func (h *rtspStreamHandler) hasClients() bool {
 	return false
 }
 
+// touchInterest records a DESCRIBE/SETUP on this path so idle-disconnect
+// keeps the preview alive while a client is still negotiating (before it
+// counts as a playing client).
+func (h *rtspStreamHandler) touchInterest() {
+	h.mu.Lock()
+	h.lastInterest = time.Now()
+	h.mu.Unlock()
+}
+
+// interestedSince reports whether this handler or any mirror saw client
+// interest (DESCRIBE/SETUP) after t.
+func (h *rtspStreamHandler) interestedSince(t time.Time) bool {
+	h.mu.RLock()
+	interest := h.lastInterest
+	mirrors := append([]*rtspStreamHandler(nil), h.mirrors...)
+	h.mu.RUnlock()
+
+	if interest.After(t) {
+		return true
+	}
+	for _, mirror := range mirrors {
+		if mirror.interestedSince(t) {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *rtspStreamHandler) setReady(medias ...*description.Media) error {
 	h.mu.Lock()
 	if h.server == nil {
@@ -436,6 +487,7 @@ type audioPublisher struct {
 	g711Encoder    *rtplpcm.Encoder
 	adpcmDecoder   *codec.ADPCMDecoder
 	audioPacer     *mediaPacer
+	log            Logger
 	nextTimestamp  uint32
 	timestampGuard rtpTimestampGuard
 	unsupported    bool
@@ -465,7 +517,7 @@ func (p *audioPublisher) markUnsupported(reason string) {
 		return
 	}
 	p.unsupported = true
-	log.Printf("audio passthrough disabled: %s", reason)
+	p.log.Warnf("audio passthrough disabled: %s", reason)
 }
 
 func (p *audioPublisher) processAAC(data []byte, timestamp mediaTimestamp, handler *rtspStreamHandler, meta *streamMetadata, publish bool) error {
@@ -481,7 +533,7 @@ func (p *audioPublisher) processAAC(data []byte, timestamp mediaTimestamp, handl
 		if handler.ready() {
 			if !p.lateIgnored {
 				p.lateIgnored = true
-				log.Printf("audio arrived after RTSP session creation; keeping stream video-only")
+				p.log.Warnf("audio arrived after RTSP session creation; keeping stream video-only")
 			}
 			return nil
 		}
@@ -510,7 +562,7 @@ func (p *audioPublisher) processAAC(data []byte, timestamp mediaTimestamp, handl
 		}
 		meta.setAudioAAC(cfg.SampleRate, int(cfg.ChannelConfig))
 
-		log.Printf("audio configured codec=AAC sample_rate=%d channels=%d", cfg.SampleRate, cfg.ChannelConfig)
+		p.log.Debugf("audio configured codec=AAC sample_rate=%d channels=%d", cfg.SampleRate, cfg.ChannelConfig)
 	}
 
 	if !handler.ready() {
@@ -559,7 +611,7 @@ func (p *audioPublisher) processADPCM(data []byte, timestamp mediaTimestamp, han
 		if handler.ready() {
 			if !p.lateIgnored {
 				p.lateIgnored = true
-				log.Printf("audio arrived after RTSP session creation; keeping stream video-only")
+				p.log.Warnf("audio arrived after RTSP session creation; keeping stream video-only")
 			}
 			return nil
 		}
@@ -587,7 +639,7 @@ func (p *audioPublisher) processADPCM(data []byte, timestamp mediaTimestamp, han
 		}
 		meta.setAudioG711(sampleRate, channelCount)
 
-		log.Printf("audio configured codec=PCMA sample_rate=%d channels=%d", sampleRate, channelCount)
+		p.log.Debugf("audio configured codec=PCMA sample_rate=%d channels=%d", sampleRate, channelCount)
 	}
 
 	if !handler.ready() {
@@ -623,7 +675,6 @@ type streamMetadata struct {
 
 	cameraName      string
 	name            string
-	token           string
 	path            string
 	width           uint32
 	height          uint32
@@ -636,7 +687,6 @@ type streamMetadata struct {
 
 type streamMetadataSnapshot struct {
 	Name            string
-	Token           string
 	Path            string
 	Width           uint32
 	Height          uint32
@@ -685,7 +735,6 @@ func (m *streamMetadata) snapshot() streamMetadataSnapshot {
 	defer m.mu.RUnlock()
 	return streamMetadataSnapshot{
 		Name:            m.name,
-		Token:           m.token,
 		Path:            m.path,
 		Width:           m.width,
 		Height:          m.height,
@@ -695,26 +744,6 @@ func (m *streamMetadata) snapshot() streamMetadataSnapshot {
 		AudioChannels:   m.audioChannels,
 		VideoCodec:      m.videoCodec,
 	}
-}
-
-func (s streamMetadataSnapshot) normalized() streamMetadataSnapshot {
-	if s.Width == 0 {
-		s.Width = 3840
-	}
-	if s.Height == 0 {
-		s.Height = 2160
-	}
-	if s.FPS == 0 {
-		s.FPS = 15
-	}
-	if s.VideoCodec == "" {
-		if strings.Contains(strings.ToLower(s.Name), "sub") || strings.Contains(strings.ToLower(s.Name), "extern") {
-			s.VideoCodec = "H264"
-		} else {
-			s.VideoCodec = "H265" // default fallback for main
-		}
-	}
-	return s
 }
 
 func getOutboundIP() string {

@@ -9,60 +9,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/shareed2k/reolinkproxy/pkg/bridge"
 )
 
-type Config struct {
-	MQTT    MQTTConfig     `yaml:"mqtt"`
-	Server  ServerConfig   `yaml:"server"`
-	ONVIF   ONVIFConfig    `yaml:"onvif"`
-	Cameras []CameraConfig `yaml:"cameras"`
-}
-
-type MQTTConfig struct {
-	Broker   string `yaml:"broker"`
-	Username string `yaml:"username"`
-	Password string `yaml:"password"`
-	Topic    string `yaml:"topic"`
-}
-
-type ServerConfig struct {
-	RTSPAddress   string `yaml:"rtsp_address"`
-	RTPAddress    string `yaml:"rtp_address"`
-	RTCPAddress   string `yaml:"rtcp_address"`
-	ONVIFAddress  string `yaml:"onvif_address"`
-	PprofAddress  string `yaml:"pprof_address"`
-	AdvertiseHost string `yaml:"advertise_host"`
-	LogLevel      string `yaml:"log_level"`
-	LogPackets    bool   `yaml:"log_packets"`
-
-	// AudioPacerInitialLatencyMs is the media pacer startup delay for audio (wall clock before
-	// the first packet is sent). Default 500ms.
-	AudioPacerInitialLatencyMs int `yaml:"audio_pacer_initial_latency_ms"`
-	// AudioPacerMaxLeadMs caps how far ahead of wall clock the audio pacer cursor may run;
-	// if exceeded, the cursor is reset to now. Default 2s.
-	AudioPacerMaxLeadMs int `yaml:"audio_pacer_max_lead_ms"`
-	// AudioPacerSnapOnPast, when true, snaps the emission cursor to now if it falls behind
-	// wall clock.
-	AudioPacerSnapOnPast bool `yaml:"audio_pacer_snap_on_past"`
-
-	// VideoPacerInitialLatencyMs is the media pacer startup delay for video. Default 1500ms.
-	VideoPacerInitialLatencyMs int `yaml:"video_pacer_initial_latency_ms"`
-	// VideoPacerMaxLeadMs caps how far ahead of wall clock the video pacer cursor may run. Default 3s.
-	VideoPacerMaxLeadMs int `yaml:"video_pacer_max_lead_ms"`
-	// VideoPacerSnapOnPast, when true, snaps the video pacer cursor to now when behind; default false for video.
-	VideoPacerSnapOnPast bool `yaml:"video_pacer_snap_on_past"`
-
-	// DisableRTCPSenderReports suppresses periodic RTCP Sender Reports on published streams (default true).
-	// Some receivers (e.g. FFmpeg) re-anchor decode time on each SR, which can cause non-monotonic DTS warnings.
-	DisableRTCPSenderReports bool `yaml:"disable_rtcp_sender_reports"`
-}
-
-type ONVIFConfig struct {
-	Username string `yaml:"username"`
-	Password string `yaml:"password"`
-}
-
-type CameraConfig struct {
+// envCameraConfig mirrors the REOLINK_CAMERA_<n>_* env layout. The yaml tag
+// (uppercased) is the env field name.
+type envCameraConfig struct {
 	Name           string        `yaml:"name"`
 	Host           string        `yaml:"host"`
 	Port           int           `yaml:"port"`
@@ -75,8 +28,6 @@ type CameraConfig struct {
 	RTSPPath       string        `yaml:"rtsp_path"`
 	TalkProfile    string        `yaml:"talk_profile"`
 	TalkVolume     int           `yaml:"talk_volume"`
-	TalkEncoder    string        `yaml:"talk_encoder"`
-	TalkEncoderCmd string        `yaml:"talk_encoder_cmd"`
 	PauseOnMotion  bool          `yaml:"pause_on_motion"`
 	PauseOnClient  bool          `yaml:"pause_on_client"`
 	PauseTimeout   time.Duration `yaml:"pause_timeout"`
@@ -87,56 +38,17 @@ type CameraConfig struct {
 
 var (
 	cameraEnvKeyRE   = regexp.MustCompile(`^REOLINK_CAMERA_(\d+)_([A-Z0-9_]+)$`)
-	cameraConfigType = reflect.TypeOf(CameraConfig{})
+	cameraConfigType = reflect.TypeOf(envCameraConfig{})
 	durationType     = reflect.TypeOf(time.Duration(0))
 )
 
-func (c ServerConfig) audioPacerInitialLatency() time.Duration {
-	return time.Duration(c.AudioPacerInitialLatencyMs) * time.Millisecond
-}
-
-func (c ServerConfig) audioPacerMaxLead() time.Duration {
-	return time.Duration(c.AudioPacerMaxLeadMs) * time.Millisecond
-}
-
-func (c ServerConfig) videoPacerInitialLatency() time.Duration {
-	return time.Duration(c.VideoPacerInitialLatencyMs) * time.Millisecond
-}
-
-func (c ServerConfig) videoPacerMaxLead() time.Duration {
-	return time.Duration(c.VideoPacerMaxLeadMs) * time.Millisecond
-}
-
-func defaultConfig() *Config {
-	return &Config{
-		Server: ServerConfig{
-			RTSPAddress:                ":8554",
-			RTPAddress:                 ":8000",
-			RTCPAddress:                ":8001",
-			ONVIFAddress:               ":8002",
-			PprofAddress:               "",
-			LogLevel:                   "info",
-			AudioPacerInitialLatencyMs: 500,
-			AudioPacerMaxLeadMs:        2000,
-			AudioPacerSnapOnPast:       true,
-			VideoPacerInitialLatencyMs: 1500,
-			VideoPacerMaxLeadMs:        3000,
-			VideoPacerSnapOnPast:       false,
-			DisableRTCPSenderReports:   true,
-		},
-		MQTT: MQTTConfig{
-			Topic: "reolinkproxy",
-		},
-	}
-}
-
-func loadCamerasFromEnv() ([]CameraConfig, error) {
+func loadCamerasFromEnv() ([]bridge.CameraConfig, error) {
 	return loadCamerasFromEntries(os.Environ())
 }
 
-func loadCamerasFromEntries(entries []string) ([]CameraConfig, error) {
+func loadCamerasFromEntries(entries []string) ([]bridge.CameraConfig, error) {
 	fieldIndexes := cameraEnvFieldIndexes()
-	camerasByIndex := make(map[int]*CameraConfig)
+	camerasByIndex := make(map[int]*envCameraConfig)
 
 	for _, entry := range entries {
 		key, value, ok := strings.Cut(entry, "=")
@@ -161,7 +73,7 @@ func loadCamerasFromEntries(entries []string) ([]CameraConfig, error) {
 
 		camera := camerasByIndex[cameraIndex]
 		if camera == nil {
-			camera = &CameraConfig{}
+			camera = &envCameraConfig{}
 			camerasByIndex[cameraIndex] = camera
 		}
 
@@ -181,19 +93,53 @@ func loadCamerasFromEntries(entries []string) ([]CameraConfig, error) {
 	}
 	sort.Ints(indexes)
 
-	cameras := make([]CameraConfig, 0, len(indexes))
+	cameras := make([]bridge.CameraConfig, 0, len(indexes))
 	for _, cameraIndex := range indexes {
-		camera := *camerasByIndex[cameraIndex]
-		applyCameraDefaults(&camera)
-
-		if err := validateCameraConfig(&camera); err != nil {
+		camera := camerasByIndex[cameraIndex].toBridgeConfig()
+		camera.ApplyDefaults()
+		if err := camera.Validate(); err != nil {
 			return nil, fmt.Errorf("REOLINK_CAMERA_%d_*: %w", cameraIndex, err)
 		}
-
 		cameras = append(cameras, camera)
 	}
 
 	return cameras, nil
+}
+
+func (c *envCameraConfig) toBridgeConfig() bridge.CameraConfig {
+	return bridge.CameraConfig{
+		Name:           c.Name,
+		Host:           c.Host,
+		Port:           c.Port,
+		UID:            c.UID,
+		Username:       c.Username,
+		Password:       c.Password,
+		Timeout:        c.Timeout,
+		Streams:        splitCameraStreams(c.Stream),
+		Channel:        c.Channel,
+		RTSPPath:       c.RTSPPath,
+		TalkProfile:    c.TalkProfile,
+		TalkVolume:     c.TalkVolume,
+		PauseOnMotion:  c.PauseOnMotion,
+		PauseOnClient:  c.PauseOnClient,
+		PauseTimeout:   c.PauseTimeout,
+		IdleDisconnect: c.IdleDisconnect,
+		IdleTimeout:    c.IdleTimeout,
+		BatteryCamera:  c.BatteryCamera,
+	}
+}
+
+func splitCameraStreams(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		name := strings.ToLower(strings.TrimSpace(part))
+		if name == "" {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out
 }
 
 func cameraEnvFieldIndexes() map[string]int {
@@ -240,79 +186,4 @@ func setFieldFromEnv(field reflect.Value, rawValue string, envKey string) error 
 	}
 
 	return nil
-}
-
-func applyCameraDefaults(camera *CameraConfig) {
-	if camera.Port == 0 {
-		camera.Port = 9000
-	}
-	if camera.Stream == "" {
-		camera.Stream = "main"
-	}
-	if camera.RTSPPath == "" {
-		camera.RTSPPath = camera.Name + "/stream"
-	}
-	if camera.Timeout == 0 {
-		camera.Timeout = 10 * time.Second
-	}
-	camera.TalkProfile = normalizeCameraProfileName(camera.TalkProfile)
-	if camera.TalkVolume == 0 {
-		camera.TalkVolume = 100
-	}
-	if camera.TalkEncoder == "" {
-		camera.TalkEncoder = "internal"
-	}
-	if camera.PauseTimeout == 0 {
-		camera.PauseTimeout = time.Second
-	}
-	if camera.IdleTimeout == 0 {
-		camera.IdleTimeout = 30 * time.Second
-	}
-}
-
-func validateCameraConfig(camera *CameraConfig) error {
-	if camera.Name == "" {
-		return fmt.Errorf("camera name is required")
-	}
-	if camera.Host == "" && camera.UID == "" {
-		return fmt.Errorf("camera host or uid is required")
-	}
-	if camera.TalkProfile != "" && !camera.hasStream(camera.TalkProfile) {
-		return fmt.Errorf("camera talk_profile %q must be one of configured streams %q", camera.TalkProfile, camera.Stream)
-	}
-	return nil
-}
-
-func splitCameraStreams(raw string) []string {
-	parts := strings.Split(raw, ",")
-	out := make([]string, 0, len(parts))
-	for _, part := range parts {
-		name := normalizeCameraProfileName(part)
-		if name == "" {
-			continue
-		}
-		out = append(out, name)
-	}
-	return out
-}
-
-func normalizeCameraProfileName(raw string) string {
-	return strings.ToLower(strings.TrimSpace(raw))
-}
-
-func (c CameraConfig) hasStream(name string) bool {
-	name = normalizeCameraProfileName(name)
-	for _, stream := range splitCameraStreams(c.Stream) {
-		if stream == name {
-			return true
-		}
-	}
-	return false
-}
-
-func (c CameraConfig) preferredTalkProfile() string {
-	if c.hasStream(c.TalkProfile) {
-		return normalizeCameraProfileName(c.TalkProfile)
-	}
-	return ""
 }

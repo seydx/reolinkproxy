@@ -114,12 +114,14 @@ func aesCFB(buf []byte, key [16]byte, encrypt bool) []byte {
 
 	if encrypt {
 		//nolint:staticcheck // CFB is required by the Reolink Baichuan protocol.
+		//lint:ignore SA1019 CFB is required by the Reolink Baichuan protocol.
 		stream := cipher.NewCFBEncrypter(block, aesIV) //#nosec G407
 		stream.XORKeyStream(out, out)
 		return out
 	}
 
 	//nolint:staticcheck // CFB is required by the Reolink Baichuan protocol.
+	//lint:ignore SA1019 CFB is required by the Reolink Baichuan protocol.
 	stream := cipher.NewCFBDecrypter(block, aesIV)
 	stream.XORKeyStream(out, out)
 	return out

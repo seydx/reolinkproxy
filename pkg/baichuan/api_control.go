@@ -77,12 +77,28 @@ func (c *Client) SirenHubTimes(ctx context.Context, times int) error {
 	return err
 }
 
-// SetWhiteLed enables or disables the white LED (floodlight).
+// SetWhiteLed enables or disables the white LED (floodlight) via the manual
+// floodlight control (msg 288; msg 290 is the scheduled-tasks config and
+// rejects direct switching).
 func (c *Client) SetWhiteLed(ctx context.Context, channel uint8, status int) error {
-	_, err := c.execCommand(ctx, msgIDWhiteLedSet, channel, xmlFloodlightManualBody{
-		FloodlightManual: xmlFloodlightManual{Version: "1.1", ChannelID: channel, Status: status, Duration: 180},
+	body, err := marshalXMLDocument(xmlFloodlightManualBody{
+		FloodlightManual: xmlFloodlightManual{Version: "1", ChannelID: channel, Status: status, Duration: 180},
 	})
-	return err
+	if err != nil {
+		return fmt.Errorf("marshal xml: %w", err)
+	}
+
+	resp, err := c.sendRequest(ctx, request{
+		MsgID:     msgIDFloodlightManual,
+		ChannelID: channel,
+		Class:     classModernWithOffset,
+		Extension: channelExtension(channel),
+		Body:      body,
+	})
+	if err != nil {
+		return err
+	}
+	return resp.success()
 }
 
 // GetWhiteLed retrieves the current state of the floodlight.
@@ -159,7 +175,7 @@ func (c *Client) PTZControl(ctx context.Context, channel uint8, command string, 
 // PTZPreset moves the camera to a saved PTZ preset ID.
 func (c *Client) PTZPreset(ctx context.Context, channel uint8, presetID int) error {
 	_, err := c.execCommand(ctx, msgIDPTZControlPreset, channel, xmlPtzPresetBody{
-		PtzPreset: xmlPtzPreset{Version: "1.1", ChannelID: channel, PresetList: xmlPtzPresetList{Preset: xmlPtzPresetItem{ID: presetID, Command: "ToPos"}}},
+		PtzPreset: xmlPtzPreset{Version: "1.1", ChannelID: channel, PresetList: xmlPtzPresetList{Preset: xmlPtzPresetItem{ID: presetID, Command: "toPos"}}},
 	})
 	return err
 }
@@ -186,6 +202,71 @@ func (c *Client) Reboot(ctx context.Context, channel uint8) error {
 		Reboot: xmlReboot{Channel: channel},
 	})
 	return err
+}
+
+// RawCommand sends an arbitrary Baichuan command and returns the reply XML.
+// A debugging/exploration helper for probing firmware behavior; body may be
+// empty for query-style commands.
+func (c *Client) RawCommand(ctx context.Context, msgID uint32, channel uint8, body string) (string, error) {
+	if err := c.Login(ctx); err != nil {
+		return "", err
+	}
+
+	var bodyBytes []byte
+	if body != "" {
+		bodyBytes = append([]byte(xml.Header), []byte(body)...)
+	}
+
+	resp, err := c.sendRequest(ctx, request{
+		MsgID:     msgID,
+		ChannelID: channel,
+		Class:     classModernWithOffset,
+		Body:      bodyBytes,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	return resp.XML, nil
+}
+
+// DevInfo describes the device as reported by GetDevInfo (msg 80).
+type DevInfo struct {
+	Name            string `xml:"name"`
+	Type            string `xml:"type"`
+	SerialNumber    string `xml:"serialNumber"`
+	HardwareVersion string `xml:"hardwareVersion"`
+	FirmwareVersion string `xml:"firmwareVersion"`
+	ItemNo          string `xml:"itemNo"`
+	Detail          string `xml:"detail"`
+}
+
+type devInfoMessage struct {
+	DevInfo *DevInfo `xml:"DevInfo"`
+	// VersionInfo is the alternative payload name used by some firmwares.
+	VersionInfo *DevInfo `xml:"VersionInfo"`
+}
+
+// GetDevInfo retrieves the device information (model, serial, firmware).
+func (c *Client) GetDevInfo(ctx context.Context, channel uint8) (*DevInfo, error) {
+	resp, err := c.execCommand(ctx, msgIDGetDevInfo, channel, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var payload devInfoMessage
+	if err := xml.Unmarshal([]byte(resp.XML), &payload); err != nil {
+		return nil, fmt.Errorf("failed to parse device info XML: %w", err)
+	}
+
+	info := payload.DevInfo
+	if info == nil {
+		info = payload.VersionInfo
+	}
+	if info == nil {
+		return nil, fmt.Errorf("no DevInfo in response")
+	}
+	return info, nil
 }
 
 // GetBattery retrieves battery status from the camera for the given channel.

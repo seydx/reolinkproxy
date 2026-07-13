@@ -1,9 +1,8 @@
-package main
+package bridge
 
 import (
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"time"
 
@@ -229,29 +228,26 @@ func enqueueTalkPCM(ctx context.Context, pcmCh chan []int16, pcm []int16) {
 }
 
 type talkbackPipeline struct {
-	cameraName     string
-	channel        uint8
-	device         *CameraDevice
-	talkVolume     int
-	talkEncoder    string
-	talkEncoderCmd string
+	cameraName string
+	channel    uint8
+	device     *cameraDevice
+	talkVolume int
+	log        Logger
 }
 
 func newTalkbackPipeline(
 	cameraName string,
 	channel uint8,
-	device *CameraDevice,
+	device *cameraDevice,
 	talkVolume int,
-	talkEncoder string,
-	talkEncoderCmd string,
+	log Logger,
 ) *talkbackPipeline {
 	return &talkbackPipeline{
-		cameraName:     cameraName,
-		channel:        channel,
-		device:         device,
-		talkVolume:     talkVolume,
-		talkEncoder:    talkEncoder,
-		talkEncoderCmd: talkEncoderCmd,
+		cameraName: cameraName,
+		channel:    channel,
+		device:     device,
+		talkVolume: talkVolume,
+		log:        log,
 	}
 }
 
@@ -269,11 +265,11 @@ func (p *talkbackPipeline) run(ctx context.Context, pcmCh <-chan []int16, input 
 			talkSession, err := p.device.StartTalk(connectCtx, p.channel)
 			cancel()
 			if err != nil {
-				log.Printf("talk %s start error: %v", p.cameraName, err)
+				p.log.Infof("talk %s start error: %v", p.cameraName, err)
 				continue
 			}
 
-			log.Printf(
+			p.log.Infof(
 				"talk session activated camera=%s path=%s input=%s/%d target=ADPCM/%d volume=%d%%",
 				p.cameraName,
 				path,
@@ -287,7 +283,7 @@ func (p *talkbackPipeline) run(ctx context.Context, pcmCh <-chan []int16, input 
 
 			closeCtx, cancelClose := context.WithTimeout(context.Background(), 5*time.Second)
 			if err := talkSession.Close(closeCtx); err != nil {
-				log.Printf("talk %s close error: %v", p.cameraName, err)
+				p.log.Infof("talk %s close error: %v", p.cameraName, err)
 			}
 			cancelClose()
 		}
@@ -298,12 +294,11 @@ func (p *talkbackPipeline) runBridge(
 	ctx context.Context,
 	path string,
 	input *rtspTalkInput,
-	talkSession *ResilientTalkSession,
+	talkSession *resilientTalkSession,
 	firstPcm []int16,
 	pcmCh <-chan []int16,
 ) {
 	startedAt := time.Now()
-	encoderMode := normalizeTalkEncoderMode(p.talkEncoder)
 	result := "completed (idle)"
 	bridgeCtx, bridgeCancel := context.WithCancel(ctx)
 	defer bridgeCancel()
@@ -311,22 +306,8 @@ func (p *talkbackPipeline) runBridge(
 		if ctx.Err() != nil {
 			result = ctx.Err().Error()
 		}
-		log.Printf("talk %s bridge stopped path=%s mode=%s duration=%v result=%s", p.cameraName, path, encoderMode, time.Since(startedAt).Round(time.Millisecond), result)
+		p.log.Infof("talk %s bridge stopped path=%s duration=%v result=%s", p.cameraName, path, time.Since(startedAt).Round(time.Millisecond), result)
 	}()
-
-	if encoderMode != talkEncoderInternal {
-		err := p.runBridgeGStreamer(bridgeCtx, path, input, talkSession, firstPcm, pcmCh)
-		if err != nil && !errors.Is(err, context.Canceled) {
-			result = err.Error()
-			log.Printf("talk %s gstreamer encoder error: %v", p.cameraName, err)
-			if encoderMode == talkEncoderGStreamer {
-				return
-			}
-			log.Printf("talk %s falling back to internal adpcm encoder", p.cameraName)
-		} else {
-			return
-		}
-	}
 
 	if err := p.runBridgeInternal(bridgeCtx, path, input, talkSession, firstPcm, pcmCh); err != nil {
 		result = err.Error()
@@ -337,7 +318,7 @@ func (p *talkbackPipeline) runBridgeInternal(
 	ctx context.Context,
 	path string,
 	input *rtspTalkInput,
-	talkSession *ResilientTalkSession,
+	talkSession *resilientTalkSession,
 	firstPcm []int16,
 	pcmCh <-chan []int16,
 ) error {
@@ -350,7 +331,7 @@ func (p *talkbackPipeline) runBridgeInternal(
 	pcmSamples := 0
 	blocksWritten := 0
 	defer func() {
-		log.Debugf("talk %s internal bridge stopped path=%s duration=%v pcm_packets=%d pcm_samples=%d blocks=%d", p.cameraName, path, time.Since(startedAt).Round(time.Millisecond), pcmPackets, pcmSamples, blocksWritten)
+		p.log.Debugf("talk %s internal bridge stopped path=%s duration=%v pcm_packets=%d pcm_samples=%d blocks=%d", p.cameraName, path, time.Since(startedAt).Round(time.Millisecond), pcmPackets, pcmSamples, blocksWritten)
 	}()
 
 	idleTimer := time.NewTimer(5 * time.Second)
@@ -370,7 +351,7 @@ func (p *talkbackPipeline) runBridgeInternal(
 		for len(pcmBuffer) >= blockSamples {
 			block, err := encoder.EncodeBlock(pcmBuffer[:blockSamples])
 			if err != nil {
-				log.Printf("talk %s adpcm encode error: %v", p.cameraName, err)
+				p.log.Infof("talk %s adpcm encode error: %v", p.cameraName, err)
 				return err
 			}
 
@@ -378,7 +359,7 @@ func (p *talkbackPipeline) runBridgeInternal(
 			err = talkSession.WriteADPCMBlock(writeCtx, block)
 			cancel()
 			if err != nil {
-				log.Printf("talk %s write error: %v", p.cameraName, err)
+				p.log.Infof("talk %s write error: %v", p.cameraName, err)
 				return err
 			}
 			blocksWritten++
@@ -395,7 +376,7 @@ func (p *talkbackPipeline) runBridgeInternal(
 	for {
 		select {
 		case <-ctx.Done():
-			log.Debugf("talk %s internal bridge context done path=%s err=%v", p.cameraName, path, ctx.Err())
+			p.log.Debugf("talk %s internal bridge context done path=%s err=%v", p.cameraName, path, ctx.Err())
 			return nil
 
 		case <-idleTimer.C:

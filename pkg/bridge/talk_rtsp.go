@@ -1,4 +1,4 @@
-package main
+package bridge
 
 import (
 	"context"
@@ -15,13 +15,12 @@ import (
 )
 
 type rtspTalkPublisher struct {
-	path           string
-	cameraName     string
-	channel        uint8
-	device         *CameraDevice
-	talkVolume     int
-	talkEncoder    string
-	talkEncoderCmd string
+	path       string
+	cameraName string
+	channel    uint8
+	device     *cameraDevice
+	talkVolume int
+	log        Logger
 
 	mu     sync.Mutex
 	active *rtspTalkSessionState
@@ -73,19 +72,17 @@ func newRTSPTalkPublisher(
 	path string,
 	cameraName string,
 	channel uint8,
-	device *CameraDevice,
+	device *cameraDevice,
 	talkVolume int,
-	talkEncoder string,
-	talkEncoderCmd string,
+	log Logger,
 ) *rtspTalkPublisher {
 	return &rtspTalkPublisher{
-		path:           strings.TrimPrefix(path, "/"),
-		cameraName:     cameraName,
-		channel:        channel,
-		device:         device,
-		talkVolume:     talkVolume,
-		talkEncoder:    talkEncoder,
-		talkEncoderCmd: talkEncoderCmd,
+		path:       strings.TrimPrefix(path, "/"),
+		cameraName: cameraName,
+		channel:    channel,
+		device:     device,
+		talkVolume: talkVolume,
+		log:        log,
 	}
 }
 
@@ -194,7 +191,7 @@ func (p *rtspTalkPublisher) ensureSessionState(session *gortsplib.ServerSession)
 		prev := p.active
 		p.mu.Unlock()
 
-		log.Debugf("talk %s replacing previous rtsp session", p.cameraName)
+		p.log.Debugf("talk %s replacing previous rtsp session", p.cameraName)
 		prev.close()
 		if prev.session != nil {
 			if prevState, ok := prev.session.UserData().(*rtspSessionState); ok && prevState != nil && prevState.talk == prev {
@@ -233,7 +230,7 @@ func (p *rtspTalkPublisher) bindInputs(session *gortsplib.ServerSession, inputs 
 		session.OnPacketRTP(current.media, inputFormat, func(pkt *rtp.Packet) {
 			pcm, err := current.decode(pkt)
 			if err != nil {
-				log.Printf("talk %s decode error: %v", p.cameraName, err)
+				p.log.Warnf("talk %s decode error: %v", p.cameraName, err)
 				return
 			}
 			if len(pcm) == 0 {
@@ -272,7 +269,7 @@ func (p *rtspTalkPublisher) startBridge(session *gortsplib.ServerSession, path s
 		defer p.finish(active)
 		defer active.close()
 		defer close(active.done)
-		pipeline := newTalkbackPipeline(p.cameraName, p.channel, p.device, p.talkVolume, p.talkEncoder, p.talkEncoderCmd)
+		pipeline := newTalkbackPipeline(p.cameraName, p.channel, p.device, p.talkVolume, p.log)
 		pipeline.run(active.ctx, active.pcmCh, primary, active.path)
 	}()
 
@@ -297,10 +294,10 @@ func (p *rtspTalkPublisher) record(ctx *gortsplib.ServerHandlerOnRecordCtx) (*ba
 }
 
 func (p *rtspTalkPublisher) startBackChannel(session *gortsplib.ServerSession, path string) error {
-	log.Printf("talk %s starting backchannel for path %s", p.cameraName, path)
+	p.log.Debugf("talk %s starting backchannel for path %s", p.cameraName, path)
 	inputs, err := selectBackChannelInputs(session.Medias())
 	if err != nil {
-		log.Printf("talk %s failed to select backchannel inputs: %v", p.cameraName, err)
+		p.log.Warnf("talk %s failed to select backchannel inputs: %v", p.cameraName, err)
 		return err
 	}
 	return p.startBridge(session, path, inputs)

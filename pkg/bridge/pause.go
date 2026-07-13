@@ -1,4 +1,4 @@
-package main
+package bridge
 
 import (
 	"sync"
@@ -21,15 +21,13 @@ type cameraMotionSnapshot struct {
 }
 
 type cameraMotionState struct {
-	mu          sync.RWMutex
-	snapshot    cameraMotionSnapshot
-	subscribers map[chan cameraMotionSnapshot]struct{}
+	mu       sync.RWMutex
+	snapshot cameraMotionSnapshot
 }
 
 func newCameraMotionState() *cameraMotionState {
 	return &cameraMotionState{
-		snapshot:    cameraMotionSnapshot{ChangedAt: time.Now()},
-		subscribers: make(map[chan cameraMotionSnapshot]struct{}),
+		snapshot: cameraMotionSnapshot{ChangedAt: time.Now()},
 	}
 }
 
@@ -41,71 +39,20 @@ func (s *cameraMotionState) snapshotCopy() cameraMotionSnapshot {
 
 func (s *cameraMotionState) setActive(active bool) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.snapshot.Known && s.snapshot.Active == active {
-		s.mu.Unlock()
 		return
 	}
 
 	s.snapshot.Known = true
 	s.snapshot.Active = active
 	s.snapshot.ChangedAt = time.Now()
-	snapshot := s.snapshot
-	subscribers := make([]chan cameraMotionSnapshot, 0, len(s.subscribers))
-	for ch := range s.subscribers {
-		subscribers = append(subscribers, ch)
-	}
-	s.mu.Unlock()
-
-	for _, ch := range subscribers {
-		select {
-		case ch <- snapshot:
-		default:
-		}
-	}
 }
 
 func (s *cameraMotionState) markUnsupported() {
 	s.mu.Lock()
-	if s.snapshot.Unsupported {
-		s.mu.Unlock()
-		return
-	}
-
+	defer s.mu.Unlock()
 	s.snapshot.Unsupported = true
-	snapshot := s.snapshot
-	subscribers := make([]chan cameraMotionSnapshot, 0, len(s.subscribers))
-	for ch := range s.subscribers {
-		subscribers = append(subscribers, ch)
-	}
-	s.mu.Unlock()
-
-	for _, ch := range subscribers {
-		select {
-		case ch <- snapshot:
-		default:
-		}
-	}
-}
-
-func (s *cameraMotionState) subscribe() (<-chan cameraMotionSnapshot, func()) {
-	ch := make(chan cameraMotionSnapshot, 1)
-
-	s.mu.Lock()
-	s.subscribers[ch] = struct{}{}
-	snapshot := s.snapshot
-	s.mu.Unlock()
-
-	ch <- snapshot
-
-	var once sync.Once
-	return ch, func() {
-		once.Do(func() {
-			s.mu.Lock()
-			delete(s.subscribers, ch)
-			s.mu.Unlock()
-			close(ch)
-		})
-	}
 }
 
 type streamPauseConfig struct {

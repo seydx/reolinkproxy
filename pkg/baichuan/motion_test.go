@@ -1,38 +1,104 @@
 package baichuan
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
-func TestParseMotionStateMatchingChannel(t *testing.T) {
+func TestParseAlarmStateMatchingChannel(t *testing.T) {
 	t.Parallel()
 
 	xmlText := `<?xml version="1.0" encoding="utf-8"?><body><AlarmEventList><AlarmEvent><channelId>0</channelId><status>none</status><AItype>none</AItype></AlarmEvent></AlarmEventList></body>`
 
-	motion, matched, err := parseMotionState(xmlText, 0)
+	state, matched, err := parseAlarmState(xmlText, 0)
 	if err != nil {
-		t.Fatalf("parseMotionState() error = %v", err)
+		t.Fatalf("parseAlarmState() error = %v", err)
 	}
 	if !matched {
-		t.Fatalf("parseMotionState() matched = false, want true")
+		t.Fatalf("parseAlarmState() matched = false, want true")
 	}
-	if motion {
-		t.Fatalf("parseMotionState() motion = true, want false")
+	if state.Active() {
+		t.Fatalf("parseAlarmState() active = true, want false")
 	}
 }
 
-func TestParseMotionStateIgnoresOtherChannels(t *testing.T) {
+func TestParseAlarmStateIgnoresOtherChannels(t *testing.T) {
 	t.Parallel()
 
 	xmlText := `<?xml version="1.0" encoding="utf-8"?><body><AlarmEventList><AlarmEvent><channelId>1</channelId><status>MD</status><AItype>people</AItype></AlarmEvent></AlarmEventList></body>`
 
-	motion, matched, err := parseMotionState(xmlText, 0)
+	state, matched, err := parseAlarmState(xmlText, 0)
 	if err != nil {
-		t.Fatalf("parseMotionState() error = %v", err)
+		t.Fatalf("parseAlarmState() error = %v", err)
 	}
 	if matched {
-		t.Fatalf("parseMotionState() matched = true, want false")
+		t.Fatalf("parseAlarmState() matched = true, want false")
 	}
-	if motion {
-		t.Fatalf("parseMotionState() motion = true, want false")
+	if state.Active() {
+		t.Fatalf("parseAlarmState() active = true, want false")
+	}
+}
+
+func TestParseAlarmStateDecodesAITypes(t *testing.T) {
+	t.Parallel()
+
+	xmlText := `<?xml version="1.0" encoding="utf-8"?><body><AlarmEventList><AlarmEvent><channelId>0</channelId><status>MD</status><AItype>people&amp;vehicle</AItype></AlarmEvent></AlarmEventList></body>`
+
+	state, matched, err := parseAlarmState(xmlText, 0)
+	if err != nil {
+		t.Fatalf("parseAlarmState() error = %v", err)
+	}
+	if !matched {
+		t.Fatalf("parseAlarmState() matched = false, want true")
+	}
+	if !state.MotionDetected {
+		t.Fatalf("parseAlarmState() motionDetected = false, want true")
+	}
+	if !slices.Equal(state.AITypes, []string{"people", "vehicle"}) {
+		t.Fatalf("parseAlarmState() aiTypes = %v, want [people vehicle]", state.AITypes)
+	}
+}
+
+func TestParseAlarmStateVisitorWithoutMotion(t *testing.T) {
+	t.Parallel()
+
+	xmlText := `<?xml version="1.0" encoding="utf-8"?><body><AlarmEventList><AlarmEvent><channelId>0</channelId><status>visitor</status><AItype>none</AItype></AlarmEvent></AlarmEventList></body>`
+
+	state, matched, err := parseAlarmState(xmlText, 0)
+	if err != nil {
+		t.Fatalf("parseAlarmState() error = %v", err)
+	}
+	if !matched {
+		t.Fatalf("parseAlarmState() matched = false, want true")
+	}
+	if state.MotionDetected {
+		t.Fatalf("parseAlarmState() motionDetected = true, want false")
+	}
+	if !state.Visitor {
+		t.Fatalf("parseAlarmState() visitor = false, want true")
+	}
+	if len(state.AITypes) != 0 {
+		t.Fatalf("parseAlarmState() aiTypes = %v, want empty", state.AITypes)
+	}
+}
+
+func TestParseAlarmStateOtherAITypeCountsAsMotion(t *testing.T) {
+	t.Parallel()
+
+	xmlText := `<?xml version="1.0" encoding="utf-8"?><body><AlarmEventList><AlarmEvent><channelId>0</channelId><status>none</status><AItype>other</AItype></AlarmEvent></AlarmEventList></body>`
+
+	state, matched, err := parseAlarmState(xmlText, 0)
+	if err != nil {
+		t.Fatalf("parseAlarmState() error = %v", err)
+	}
+	if !matched {
+		t.Fatalf("parseAlarmState() matched = false, want true")
+	}
+	if !state.MotionDetected {
+		t.Fatalf("parseAlarmState() motionDetected = false, want true (PIR other)")
+	}
+	if len(state.AITypes) != 0 {
+		t.Fatalf("parseAlarmState() aiTypes = %v, want empty", state.AITypes)
 	}
 }
 

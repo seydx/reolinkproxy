@@ -30,6 +30,10 @@ type Client struct {
 	loginMu  sync.Mutex
 	loggedIn bool
 
+	// snapMu serializes Snap calls: the JPEG chunks arrive on fresh message
+	// numbers, so concurrent snaps on one client would interleave.
+	snapMu sync.Mutex
+
 	pendingMu sync.Mutex
 	pending   map[pendingKey]chan *Message
 

@@ -90,9 +90,30 @@ func (c *Client) abilityAccess(ctx context.Context, channel uint8, name string) 
 }
 
 func (c *Client) getAbilityInfo(ctx context.Context, channel uint8) (map[string]abilityAccess, error) {
+	xmlText, err := c.AbilityInfoXML(ctx, channel)
+	if err != nil {
+		return nil, err
+	}
+
+	abilities, err := parseAbilityInfo(xmlText, channel)
+	if err != nil {
+		return nil, fmt.Errorf("parse ability info: %w", err)
+	}
+
+	return abilities, nil
+}
+
+// AbilityInfoXML returns the raw AbilityInfo XML the camera reports for the
+// logged-in user — the source of truth for capability detection (motion, ptz,
+// siren, floodlight, …).
+func (c *Client) AbilityInfoXML(ctx context.Context, channel uint8) (string, error) {
+	if err := c.Login(ctx); err != nil {
+		return "", err
+	}
+
 	ext, err := buildAbilityInfoExtension(c.cfg.Username)
 	if err != nil {
-		return nil, fmt.Errorf("build ability extension: %w", err)
+		return "", fmt.Errorf("build ability extension: %w", err)
 	}
 
 	resp, err := c.sendRequest(ctx, request{
@@ -102,15 +123,10 @@ func (c *Client) getAbilityInfo(ctx context.Context, channel uint8) (map[string]
 		Extension: ext,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("query ability info: %w", err)
+		return "", fmt.Errorf("query ability info: %w", err)
 	}
 
-	abilities, err := parseAbilityInfo(resp.XML, channel)
-	if err != nil {
-		return nil, fmt.Errorf("parse ability info: %w", err)
-	}
-
-	return abilities, nil
+	return resp.XML, nil
 }
 
 func buildAbilityInfoExtension(username string) ([]byte, error) {

@@ -1,4 +1,4 @@
-package main
+package bridge
 
 import (
 	"context"
@@ -53,6 +53,7 @@ type mediaPacer struct {
 	initialLatency time.Duration
 	snapOnPast     bool
 	handler        *rtspStreamHandler
+	log            Logger
 
 	overflowMu      sync.Mutex
 	lastOverflowLog time.Time
@@ -78,7 +79,7 @@ func (p *mediaPacer) warnOverflowOnce() {
 		return
 	}
 	p.lastOverflowLog = now
-	log.Warnf("media pacer queue overflow (cap=%d); dropping frame", cap(p.ch))
+	p.log.Warnf("media pacer queue overflow (cap=%d); dropping frame", cap(p.ch))
 }
 
 // run drains pacedFrame values from the channel until ctx is cancelled or the
