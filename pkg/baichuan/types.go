@@ -3,6 +3,7 @@ package baichuan
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -239,6 +240,25 @@ type MediaReader struct {
 	stream   Stream
 	stop     chan struct{}
 	stopOnce func()
+
+	errMu sync.Mutex
+	err   error
+}
+
+// Err returns why the reader ended early (e.g. a media parse desync), or nil
+// for a clean stop.
+func (r *MediaReader) Err() error {
+	r.errMu.Lock()
+	defer r.errMu.Unlock()
+	return r.err
+}
+
+func (r *MediaReader) setErr(err error) {
+	r.errMu.Lock()
+	defer r.errMu.Unlock()
+	if r.err == nil {
+		r.err = err
+	}
 }
 
 // Close stops the media reader.

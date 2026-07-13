@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 )
 
 type request struct {
@@ -108,14 +109,10 @@ func (c *Client) readMessage() (*Message, error) {
 
 	binaryPayload := false
 	if extensionMeta != nil && extensionMeta.BinaryData != nil && *extensionMeta.BinaryData == 1 {
-		c.binaryMu.Lock()
-		c.binaryMsgNums[header.MsgNum] = struct{}{}
-		c.binaryMu.Unlock()
+		c.markBinaryMsgNum(header.MsgNum)
 		binaryPayload = true
 	} else {
-		c.binaryMu.RLock()
-		_, binaryPayload = c.binaryMsgNums[header.MsgNum]
-		c.binaryMu.RUnlock()
+		binaryPayload = c.isBinaryMsgNum(header.MsgNum)
 	}
 
 	var payload []byte
@@ -148,6 +145,41 @@ func (c *Client) readMessage() (*Message, error) {
 		Binary:        binaryPayload,
 		ExtensionMeta: extensionMeta,
 	}, nil
+}
+
+// binaryMsgNumTTL bounds how long a message number stays flagged as binary
+// after its last use. Message numbers are uint16 and wrap on long-running
+// connections (snapshot chunks burn several per call), and a stale flag would
+// route an unrelated reply into the media path.
+const binaryMsgNumTTL = 5 * time.Minute
+
+func (c *Client) markBinaryMsgNum(msgNum uint16) {
+	c.binaryMu.Lock()
+	defer c.binaryMu.Unlock()
+	c.binaryMsgNums[msgNum] = time.Now()
+
+	for num, lastSeen := range c.binaryMsgNums {
+		if time.Since(lastSeen) > binaryMsgNumTTL {
+			delete(c.binaryMsgNums, num)
+		}
+	}
+}
+
+func (c *Client) isBinaryMsgNum(msgNum uint16) bool {
+	c.binaryMu.Lock()
+	defer c.binaryMu.Unlock()
+
+	lastSeen, ok := c.binaryMsgNums[msgNum]
+	if !ok {
+		return false
+	}
+	if time.Since(lastSeen) > binaryMsgNumTTL {
+		delete(c.binaryMsgNums, msgNum)
+		return false
+	}
+	// Refresh: an active media stream keeps its message number alive.
+	c.binaryMsgNums[msgNum] = time.Now()
+	return true
 }
 
 func (c *Client) encodeRequest(req request) []byte {

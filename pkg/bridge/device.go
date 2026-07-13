@@ -174,51 +174,16 @@ func (m *cameraDevice) StreamPackets(ctx context.Context, channel uint8, stream 
 				continue
 			}
 
-			stallTimer := time.NewTimer(15 * time.Second)
-			idleTicker := time.NewTicker(time.Second)
-		readLoop:
-			for {
-				select {
-				case <-ctx.Done():
-					stallTimer.Stop()
-					idleTicker.Stop()
-					return
-				case packet, ok := <-reader.Packets:
-					if !ok {
-						break readLoop
-					}
-					select {
-					case <-ctx.Done():
-						stallTimer.Stop()
-						idleTicker.Stop()
-						return
-					case out <- packet:
-					}
-					if !stallTimer.Stop() {
-						select {
-						case <-stallTimer.C:
-						default:
-						}
-					}
-					stallTimer.Reset(15 * time.Second)
-				case <-stallTimer.C:
-					m.log.Warnf("stream %s channel %d stalled for 15s, reconnecting", m.cameraName, channel)
-					m.ResetIfCurrent(client, "stream stalled for 15s")
-					break readLoop
-				case <-idleTicker.C:
-					if wantStream != nil && !wantStream() {
-						m.log.Infof("stream %s channel %d idle, stopping preview", m.cameraName, channel)
-						if err := client.StopPreview(ctx, channel, stream); err != nil {
-							m.ResetIfCurrent(client, fmt.Sprintf("idle preview stop failed: %v", err))
-						}
-						break readLoop
-					}
-				}
+			if done := m.pumpPreview(ctx, client, channel, stream, reader, out, wantStream); done {
+				return
 			}
-			stallTimer.Stop()
-			idleTicker.Stop()
 
-			if wantStream == nil || wantStream() {
+			// A media desync only affects this stream — keep the shared client
+			// (event listener, other streams), stop the camera-side session
+			// and restart the preview with a fresh parser.
+			if reader.Err() != nil {
+				_ = client.StopPreview(ctx, channel, stream)
+			} else if wantStream == nil || wantStream() {
 				m.ResetIfCurrent(client, "preview stream ended")
 			}
 			time.Sleep(100 * time.Millisecond) // brief wait before reconnect
@@ -226,6 +191,62 @@ func (m *cameraDevice) StreamPackets(ctx context.Context, channel uint8, stream 
 	}()
 
 	return out
+}
+
+// pumpPreview forwards media packets from one preview session until it ends.
+// done=true means the caller's context is finished; false asks for a session
+// restart.
+func (m *cameraDevice) pumpPreview(
+	ctx context.Context,
+	client *baichuan.Client,
+	channel uint8,
+	stream baichuan.Stream,
+	reader *baichuan.MediaReader,
+	out chan<- baichuan.MediaPacket,
+	wantStream func() bool,
+) bool {
+	stallTimer := time.NewTimer(15 * time.Second)
+	defer stallTimer.Stop()
+	idleTicker := time.NewTicker(time.Second)
+	defer idleTicker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return true
+		case packet, ok := <-reader.Packets:
+			if !ok {
+				if err := reader.Err(); err != nil {
+					m.log.Warnf("stream %s channel %d media desync, restarting preview: %v", m.cameraName, channel, err)
+				}
+				return false
+			}
+			select {
+			case <-ctx.Done():
+				return true
+			case out <- packet:
+			}
+			if !stallTimer.Stop() {
+				select {
+				case <-stallTimer.C:
+				default:
+				}
+			}
+			stallTimer.Reset(15 * time.Second)
+		case <-stallTimer.C:
+			m.log.Warnf("stream %s channel %d stalled for 15s, reconnecting", m.cameraName, channel)
+			m.ResetIfCurrent(client, "stream stalled for 15s")
+			return false
+		case <-idleTicker.C:
+			if wantStream != nil && !wantStream() {
+				m.log.Infof("stream %s channel %d idle, stopping preview", m.cameraName, channel)
+				if err := client.StopPreview(ctx, channel, stream); err != nil {
+					m.ResetIfCurrent(client, fmt.Sprintf("idle preview stop failed: %v", err))
+				}
+				return false
+			}
+		}
+	}
 }
 
 // eventHandlers receives decoded camera events from WatchEvents. Nil fields

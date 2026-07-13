@@ -24,8 +24,8 @@ type Client struct {
 	mode          EncryptionMode
 	aesKey        [16]byte
 	hasAESKey     bool
-	binaryMu      sync.RWMutex
-	binaryMsgNums map[uint16]struct{}
+	binaryMu      sync.Mutex
+	binaryMsgNums map[uint16]time.Time
 
 	loginMu  sync.Mutex
 	loggedIn bool
@@ -95,7 +95,7 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 		transport:     transport,
 		isUDP:         isUDP,
 		mode:          EncryptionNone,
-		binaryMsgNums: make(map[uint16]struct{}),
+		binaryMsgNums: make(map[uint16]time.Time),
 		pending:       make(map[pendingKey]chan *Message),
 		subs:          make(map[uint32]map[chan *Message]struct{}),
 		closed:        make(chan struct{}),
@@ -267,7 +267,9 @@ func (c *Client) keepAliveLoop() {
 
 // Subscribe attaches a best-effort fanout listener for a given msg_id.
 func (c *Client) Subscribe(msgID uint32) (<-chan *Message, func()) {
-	ch := make(chan *Message, 64)
+	// Generous buffer: the preview subscription carries a full 4K media
+	// stream, and a dropped message desyncs the bcmedia parser.
+	ch := make(chan *Message, 256)
 
 	c.subMu.Lock()
 	if c.subs[msgID] == nil {
@@ -356,15 +358,13 @@ func (c *Client) StartPreview(ctx context.Context, channel uint8, stream Stream)
 
 				parsed, err := parser.Append(msg.Payload)
 				if err != nil {
-					xmlSnippet := msg.XML
-					if len(xmlSnippet) > 160 {
-						xmlSnippet = xmlSnippet[:160]
-					}
-					prefixLen := len(msg.Payload)
-					if prefixLen > 32 {
-						prefixLen = 32
-					}
-					c.shutdown(fmt.Errorf("bcmedia parse: %w (msg_xml=%q payload_prefix=%x)", err, xmlSnippet, msg.Payload[:prefixLen]))
+					// A lost or corrupted media message desyncs the bcmedia
+					// byte stream. The connection itself is fine (and shared
+					// with the event listener and other streams), so end just
+					// this reader — the consumer restarts the preview with a
+					// fresh parser.
+					prefixLen := min(len(msg.Payload), 32)
+					reader.setErr(fmt.Errorf("bcmedia parse: %w (payload_prefix=%x)", err, msg.Payload[:prefixLen]))
 					return
 				}
 
