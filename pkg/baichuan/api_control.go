@@ -6,8 +6,19 @@ import (
 	"fmt"
 )
 
-// execCommand is a generic helper to send XML commands to the camera.
+// execCommand sends a channel-scoped XML command: header channel is 1-based
+// (reolink_aio semantics) and the target channel rides in the extension XML.
 func (c *Client) execCommand(ctx context.Context, msgID uint32, channel uint8, body any) (*Message, error) {
+	return c.exec(ctx, msgID, headerChannelID(channel), channelExtension(channel), body)
+}
+
+// execHostCommand sends a device-scoped XML command on the host channel (250).
+// NVRs/HomeHubs reject host-level commands addressed to a stream channel.
+func (c *Client) execHostCommand(ctx context.Context, msgID uint32, body any) (*Message, error) {
+	return c.exec(ctx, msgID, channelIDHost, nil, body)
+}
+
+func (c *Client) exec(ctx context.Context, msgID uint32, headerChannel uint8, extension []byte, body any) (*Message, error) {
 	if err := c.Login(ctx); err != nil {
 		return nil, err
 	}
@@ -21,19 +32,13 @@ func (c *Client) execCommand(ctx context.Context, msgID uint32, channel uint8, b
 		}
 	}
 
-	req := request{
+	resp, err := c.sendRequest(ctx, request{
 		MsgID:     msgID,
-		ChannelID: channel,
+		ChannelID: headerChannel,
 		Class:     classModernWithOffset,
+		Extension: extension,
 		Body:      bodyBytes,
-	}
-
-	// PTZ Control needs an extension
-	if msgID == msgIDPTZControl {
-		req.Extension = []byte(fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?><Extension version="1.1"><channelId>%d</channelId></Extension>`, channel))
-	}
-
-	resp, err := c.sendRequest(ctx, req)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -248,8 +253,8 @@ type devInfoMessage struct {
 }
 
 // GetDevInfo retrieves the device information (model, serial, firmware).
-func (c *Client) GetDevInfo(ctx context.Context, channel uint8) (*DevInfo, error) {
-	resp, err := c.execCommand(ctx, msgIDGetDevInfo, channel, nil)
+func (c *Client) GetDevInfo(ctx context.Context) (*DevInfo, error) {
+	resp, err := c.execHostCommand(ctx, msgIDGetDevInfo, nil)
 	if err != nil {
 		return nil, err
 	}

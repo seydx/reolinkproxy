@@ -110,6 +110,49 @@ func buildStopPreviewXML(channel uint8, handle uint32) ([]byte, error) {
 	})
 }
 
+// LoginDeviceInfo is the DeviceInfo block carried in the modern login reply —
+// the authoritative source for the device class (reolink_aio derives is_nvr
+// from it; GetDevInfo's "type" is just the model name).
+type LoginDeviceInfo struct {
+	Type       string
+	TypeInfo   string
+	ChannelNum int
+}
+
+// IsNVR reports whether the device is a multi-channel host (NVR/Hub) rather
+// than a standalone camera.
+func (i LoginDeviceInfo) IsNVR() bool {
+	switch i.Type {
+	case "nvr", "wifi_nvr", "homehub":
+		return true
+	}
+	switch i.TypeInfo {
+	case "NVR", "WIFI_NVR", "HOMEHUB":
+		return true
+	}
+	return false
+}
+
+type xmlLoginDeviceInfo struct {
+	DeviceInfo *struct {
+		Type       string `xml:"type"`
+		TypeInfo   string `xml:"typeInfo"`
+		ChannelNum int    `xml:"channelNum"`
+	} `xml:"DeviceInfo"`
+}
+
+func parseLoginDeviceInfo(xmlText string) LoginDeviceInfo {
+	var body xmlLoginDeviceInfo
+	if err := xml.Unmarshal([]byte(xmlText), &body); err != nil || body.DeviceInfo == nil {
+		return LoginDeviceInfo{}
+	}
+	return LoginDeviceInfo{
+		Type:       body.DeviceInfo.Type,
+		TypeInfo:   body.DeviceInfo.TypeInfo,
+		ChannelNum: body.DeviceInfo.ChannelNum,
+	}
+}
+
 func parseNonce(xmlText string) (string, error) {
 	var body xmlBody
 	if err := xml.Unmarshal([]byte(xmlText), &body); err != nil {

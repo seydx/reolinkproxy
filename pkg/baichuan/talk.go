@@ -120,7 +120,7 @@ func (s *TalkSession) WriteADPCMBlock(_ context.Context, block []byte) error {
 	payload := serializeTalkADPCMBlock(block, s.seq)
 	err := s.client.writeRequest(request{
 		MsgID:     msgIDTalk,
-		ChannelID: s.channel,
+		ChannelID: headerChannelID(s.channel),
 		MsgNum:    s.client.reserveMessageNumber(),
 		Class:     classModernWithOffset,
 		Extension: s.binaryExtension,
@@ -190,7 +190,7 @@ func (c *Client) getTalkAbility(ctx context.Context, channel uint8) (*TalkAbilit
 
 	resp, err := c.sendRequest(ctx, request{
 		MsgID:     msgIDTalkAbility,
-		ChannelID: channel,
+		ChannelID: headerChannelID(channel),
 		Class:     classModernWithOffset,
 		Extension: extension,
 	})
@@ -278,7 +278,7 @@ func (c *Client) startTalkSession(ctx context.Context, channel uint8, cfg TalkCo
 
 	req := request{
 		MsgID:     msgIDTalkConfig,
-		ChannelID: channel,
+		ChannelID: headerChannelID(channel),
 		Class:     classModernWithOffset,
 		Extension: extension,
 		Body:      body,
@@ -318,7 +318,7 @@ func (c *Client) stopTalk(ctx context.Context, channel uint8) error {
 
 	_, err = c.sendRequest(ctx, request{
 		MsgID:     msgIDTalkReset,
-		ChannelID: channel,
+		ChannelID: headerChannelID(channel),
 		Class:     classModernWithOffset,
 		Extension: extension,
 	})

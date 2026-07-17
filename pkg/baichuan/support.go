@@ -77,7 +77,7 @@ type xmlSupportItem struct {
 
 // GetSupport queries and decodes the device capability report (msg 199).
 func (c *Client) GetSupport(ctx context.Context) (*Support, error) {
-	resp, err := c.execCommand(ctx, msgIDGetSupport, 0, nil)
+	resp, err := c.execHostCommand(ctx, msgIDGetSupport, nil)
 	if err != nil {
 		return nil, err
 	}

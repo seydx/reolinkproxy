@@ -125,13 +125,13 @@ func main() {
 
 	switch command {
 	case "info":
-		info, err := client.GetDevInfo(ctx, ch)
+		info, err := client.GetDevInfo(ctx)
 		exitOn(err)
 		fmt.Printf("name:     %s\ntype:     %s\nserial:   %s\nhardware: %s\nfirmware: %s\nitemNo:   %s\ndetail:   %s\n",
 			info.Name, info.Type, info.SerialNumber, info.HardwareVersion, info.FirmwareVersion, info.ItemNo, info.Detail)
 
 	case "abilities":
-		xmlText, err := client.AbilityInfoXML(ctx, ch)
+		xmlText, err := client.AbilityInfoXML(ctx)
 		exitOn(err)
 		fmt.Println(xmlText)
 

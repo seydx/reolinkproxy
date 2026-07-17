@@ -40,7 +40,9 @@ type xmlEncodeTable struct {
 // sub. Devices list multiple encode tables per stream type (selectable
 // resolutions); the highest resolution is reported.
 func (c *Client) StreamProfiles(ctx context.Context, channel uint8) ([]StreamProfile, error) {
-	resp, err := c.execCommand(ctx, msgIDStreamInfoList, channel, nil)
+	// Host-level query: the list carries every channel; the ChannelBits filter
+	// below selects the requested one.
+	resp, err := c.execHostCommand(ctx, msgIDStreamInfoList, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -85,6 +87,36 @@ func (c *Client) StreamProfiles(ctx context.Context, channel uint8) ([]StreamPro
 		return nil, fmt.Errorf("camera reported no streams")
 	}
 	return profiles, nil
+}
+
+// OccupiedChannels returns the channels that actually offer streams —
+// on an NVR/Hub these are the ports with a camera attached.
+func (c *Client) OccupiedChannels(ctx context.Context) ([]int, error) {
+	resp, err := c.execHostCommand(ctx, msgIDStreamInfoList, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var body xmlStreamInfoListBody
+	if err := xml.Unmarshal([]byte(resp.XML), &body); err != nil {
+		return nil, fmt.Errorf("parse stream info XML: %w", err)
+	}
+	if body.StreamInfoList == nil {
+		return nil, fmt.Errorf("no StreamInfoList in response")
+	}
+
+	var mask uint64
+	for _, info := range body.StreamInfoList.StreamInfos {
+		mask |= uint64(info.ChannelBits) //#nosec G115
+	}
+
+	var channels []int
+	for ch := 0; ch < 64; ch++ {
+		if mask>>ch&1 == 1 {
+			channels = append(channels, ch)
+		}
+	}
+	return channels, nil
 }
 
 func profileNameForStreamType(streamType string) string {

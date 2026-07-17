@@ -90,7 +90,7 @@ func (c *Client) abilityAccess(ctx context.Context, channel uint8, name string) 
 }
 
 func (c *Client) getAbilityInfo(ctx context.Context, channel uint8) (map[string]abilityAccess, error) {
-	xmlText, err := c.AbilityInfoXML(ctx, channel)
+	xmlText, err := c.AbilityInfoXML(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -105,8 +105,8 @@ func (c *Client) getAbilityInfo(ctx context.Context, channel uint8) (map[string]
 
 // AbilityInfoXML returns the raw AbilityInfo XML the camera reports for the
 // logged-in user — the source of truth for capability detection (motion, ptz,
-// siren, floodlight, …).
-func (c *Client) AbilityInfoXML(ctx context.Context, channel uint8) (string, error) {
+// siren, floodlight, …). The table covers every channel of the device.
+func (c *Client) AbilityInfoXML(ctx context.Context) (string, error) {
 	if err := c.Login(ctx); err != nil {
 		return "", err
 	}
@@ -116,9 +116,11 @@ func (c *Client) AbilityInfoXML(ctx context.Context, channel uint8) (string, err
 		return "", fmt.Errorf("build ability extension: %w", err)
 	}
 
+	// Host-level: the ability table covers all channels; the parse below
+	// filters by the requested one.
 	resp, err := c.sendRequest(ctx, request{
 		MsgID:     msgIDAbilityInfo,
-		ChannelID: channel,
+		ChannelID: channelIDHost,
 		Class:     classModernWithOffset,
 		Extension: ext,
 	})

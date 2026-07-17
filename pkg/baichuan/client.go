@@ -22,6 +22,8 @@ type Client struct {
 
 	stateMu       sync.RWMutex
 	mode          EncryptionMode
+	negotiated    bool
+	loginInfo     LoginDeviceInfo
 	aesKey        [16]byte
 	hasAESKey     bool
 	binaryMu      sync.Mutex
@@ -176,9 +178,10 @@ func (c *Client) Login(ctx context.Context) error {
 	}
 
 	nonceResp, err := c.sendRequest(ctx, request{
-		MsgID:   msgIDLogin,
-		Class:   classLegacy,
-		ForceBC: true,
+		MsgID:     msgIDLogin,
+		ChannelID: channelIDHost,
+		Class:     classLegacy,
+		ForceBC:   true,
 	})
 	if err != nil {
 		return fmt.Errorf("request nonce: %w", err)
@@ -202,6 +205,10 @@ func (c *Client) Login(ctx context.Context) error {
 	c.stateMu.Lock()
 	c.aesKey = DeriveAESKey(nonce, c.cfg.Password)
 	c.hasAESKey = true
+	// The login body itself is BC-encrypted even when AES was negotiated —
+	// except when the firmware negotiated "none" (0xDD00), which rejects a
+	// BC-scrambled login.
+	loginPlain := c.negotiated && c.mode == EncryptionNone
 	c.stateMu.Unlock()
 
 	loginXML, err := buildLoginXML(MD5Modern(c.cfg.Username+nonce), MD5Modern(c.cfg.Password+nonce))
@@ -209,17 +216,25 @@ func (c *Client) Login(ctx context.Context) error {
 		return err
 	}
 
-	if _, err := c.sendRequest(ctx, request{
-		MsgID:   msgIDLogin,
-		Class:   classModernWithOffset,
-		Body:    loginXML,
-		ForceBC: true,
-	}); err != nil {
+	loginResp, err := c.sendRequest(ctx, request{
+		MsgID:     msgIDLogin,
+		ChannelID: channelIDHost,
+		Class:     classModernWithOffset,
+		Body:      loginXML,
+		ForceBC:   !loginPlain,
+	})
+	if err != nil {
 		return fmt.Errorf("login failed: %w", err)
 	}
 
 	c.stateMu.Lock()
-	if c.hasAESKey {
+	c.loginInfo = parseLoginDeviceInfo(loginResp.XML)
+	c.stateMu.Unlock()
+
+	c.stateMu.Lock()
+	// Firmwares without the 0xDD negotiation reply get the official client's
+	// assumption (AES); negotiated modes are authoritative.
+	if !c.negotiated && c.hasAESKey {
 		c.mode = EncryptionAES
 	}
 	c.stateMu.Unlock()
@@ -250,13 +265,15 @@ func (c *Client) keepAliveLoop() {
 		case <-ticker.C:
 			if c.isUDP {
 				_ = c.sendNoReply(request{
-					MsgID: msgIDUDPKeepAlive,
-					Class: classModernWithOffset,
+					MsgID:     msgIDUDPKeepAlive,
+					ChannelID: channelIDHost,
+					Class:     classModernWithOffset,
 				})
 			} else {
 				_ = c.sendNoReply(request{
-					MsgID: msgIDPing,
-					Class: classModernWithOffset,
+					MsgID:     msgIDPing,
+					ChannelID: channelIDHost,
+					Class:     classModernWithOffset,
 				})
 			}
 		case <-c.closed:
@@ -308,7 +325,7 @@ func (c *Client) StartPreview(ctx context.Context, channel uint8, stream Stream)
 	sub, unsubscribe := c.Subscribe(msgIDVideo)
 	if _, err := c.sendRequest(ctx, request{
 		MsgID:      msgIDVideo,
-		ChannelID:  channel,
+		ChannelID:  headerChannelID(channel),
 		StreamType: streamType,
 		Class:      classModernWithOffset,
 		Body:       body,
@@ -398,7 +415,7 @@ func (c *Client) StopPreview(ctx context.Context, channel uint8, stream Stream) 
 
 	resp, err := c.sendRequest(ctx, request{
 		MsgID:      msgIDVideoStop,
-		ChannelID:  channel,
+		ChannelID:  headerChannelID(channel),
 		StreamType: streamType,
 		Class:      classModernWithOffset,
 		Body:       body,
@@ -487,6 +504,14 @@ func (c *Client) snapshotCipher() (EncryptionMode, [16]byte, bool) {
 	return c.mode, c.aesKey, c.hasAESKey
 }
 
+// LoginDeviceInfo returns the DeviceInfo block from the login reply. Zero
+// value before the first successful Login.
+func (c *Client) LoginDeviceInfo() LoginDeviceInfo {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	return c.loginInfo
+}
+
 func (c *Client) setNegotiatedEncryption(code uint16) {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
@@ -494,11 +519,15 @@ func (c *Client) setNegotiatedEncryption(code uint16) {
 	switch byte(code) { //#nosec G115
 	case 0x00:
 		c.mode = EncryptionNone
-	case 0x01, 0x12:
+	case 0x01:
 		c.mode = EncryptionBC
-	case 0x02, 0x03:
+	case 0x02, 0x03, 0x12:
+		// 0x12 is "full AES" — XML payloads are AES-encrypted like 0x02.
 		c.mode = EncryptionAES
+	default:
+		return
 	}
+	c.negotiated = true
 }
 
 func streamParams(stream Stream) (uint8, uint32) {

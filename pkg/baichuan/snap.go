@@ -60,7 +60,7 @@ func (c *Client) Snap(ctx context.Context, channel uint8) ([]byte, error) {
 
 	resp, err := c.sendRequest(ctx, request{
 		MsgID:     msgIDSnap,
-		ChannelID: channel,
+		ChannelID: headerChannelID(channel),
 		Class:     classModernWithOffset,
 		Extension: channelExtension(channel),
 		Body:      body,

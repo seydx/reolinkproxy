@@ -40,7 +40,7 @@ func (c *Client) SetWebhook(ctx context.Context, enable bool, url string) error 
 	if enable {
 		enableInt = 1
 	}
-	_, err := c.execCommand(ctx, msgIDWebhookSet, 0, xmlHaCfgBody{
+	_, err := c.execHostCommand(ctx, msgIDWebhookSet, xmlHaCfgBody{
 		HaCfg: xmlHaCfg{Version: "1.1", Enable: enableInt, URL: url},
 	})
 	return err
@@ -50,7 +50,7 @@ func (c *Client) SetWebhook(ctx context.Context, enable bool, url string) error 
 // serves as the capability check — unsupported firmwares answer with a status
 // error.
 func (c *Client) GetWebhook(ctx context.Context) (enabled bool, url string, err error) {
-	resp, err := c.execCommand(ctx, msgIDWebhookGet, 0, nil)
+	resp, err := c.execHostCommand(ctx, msgIDWebhookGet, nil)
 	if err != nil {
 		return false, "", err
 	}
