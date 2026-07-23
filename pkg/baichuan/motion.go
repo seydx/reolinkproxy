@@ -15,9 +15,25 @@ type AlarmEventList struct {
 
 // AlarmEvent represents a single motion or AI alarm event.
 type AlarmEvent struct {
-	ChannelID uint8  `xml:"channelId"`
-	Status    string `xml:"status"`
-	AIType    string `xml:"AItype"`
+	ChannelID uint8         `xml:"channelId"`
+	Status    string        `xml:"status"`
+	AIType    string        `xml:"AItype"`
+	SmartAI   []SmartAIType `xml:"smartAiTypeList>smartAiType"`
+}
+
+// SmartAIType is one zone-based smart detection (crossline, intrusion,
+// linger) in an alarm event. Index is a bitmask of the zones currently
+// detecting, SubList carries the AI type detected per zone.
+type SmartAIType struct {
+	Type    string       `xml:"type"`
+	Index   int          `xml:"index"`
+	SubList []SmartAISub `xml:"subList"`
+}
+
+// SmartAISub is one per-zone detection of a smart AI event.
+type SmartAISub struct {
+	Index int    `xml:"index"`
+	Type  string `xml:"type"`
 }
 
 // AlarmMessage is the XML payload containing an AlarmEventList.
@@ -137,6 +153,20 @@ func parseAlarmState(xmlText string, channel uint8, anyChannel bool) (AlarmState
 		for _, aiType := range parseAITypes(ev.AIType) {
 			if !slices.Contains(state.AITypes, aiType) {
 				state.AITypes = append(state.AITypes, aiType)
+			}
+		}
+		// zone-based smart detections (crossline, intrusion, linger) may
+		// fire without an MD status or plain AItype
+		for _, smart := range ev.SmartAI {
+			if smart.Index > 0 {
+				state.MotionDetected = true
+			}
+			for _, sub := range smart.SubList {
+				for _, aiType := range parseAITypes(sub.Type) {
+					if !slices.Contains(state.AITypes, aiType) {
+						state.AITypes = append(state.AITypes, aiType)
+					}
+				}
 			}
 		}
 	}

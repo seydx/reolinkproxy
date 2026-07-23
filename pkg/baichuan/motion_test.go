@@ -102,6 +102,43 @@ func TestParseAlarmStateOtherAITypeCountsAsMotion(t *testing.T) {
 	}
 }
 
+func TestParseAlarmStateSmartAIZoneEvent(t *testing.T) {
+	t.Parallel()
+
+	xmlText := `<?xml version="1.0" encoding="utf-8"?><body><AlarmEventList><AlarmEvent><channelId>0</channelId><status>none</status><AItype>none</AItype><smartAiTypeList><smartAiType><type>crossline</type><index>3</index><subList><index>0</index><type>people</type></subList><subList><index>1</index><type>vehicle</type></subList></smartAiType></smartAiTypeList></AlarmEvent></AlarmEventList></body>`
+
+	state, matched, err := parseAlarmState(xmlText, 0, false)
+	if err != nil {
+		t.Fatalf("parseAlarmState() error = %v", err)
+	}
+	if !matched {
+		t.Fatalf("parseAlarmState() matched = false, want true")
+	}
+	if !state.MotionDetected {
+		t.Fatalf("parseAlarmState() motionDetected = false, want true for active smart zone")
+	}
+	if !slices.Equal(state.AITypes, []string{"people", "vehicle"}) {
+		t.Fatalf("parseAlarmState() aiTypes = %v, want [people vehicle]", state.AITypes)
+	}
+}
+
+func TestParseAlarmStateSmartAIClearedZones(t *testing.T) {
+	t.Parallel()
+
+	xmlText := `<?xml version="1.0" encoding="utf-8"?><body><AlarmEventList><AlarmEvent><channelId>0</channelId><status>none</status><AItype>none</AItype><smartAiTypeList><smartAiType><type>crossline</type><index>0</index></smartAiType></smartAiTypeList></AlarmEvent></AlarmEventList></body>`
+
+	state, matched, err := parseAlarmState(xmlText, 0, false)
+	if err != nil {
+		t.Fatalf("parseAlarmState() error = %v", err)
+	}
+	if !matched {
+		t.Fatalf("parseAlarmState() matched = false, want true")
+	}
+	if state.Active() {
+		t.Fatalf("parseAlarmState() active = true, want false for cleared zones")
+	}
+}
+
 func TestParseAlarmStateDualLensMergesStreamChannels(t *testing.T) {
 	t.Parallel()
 
