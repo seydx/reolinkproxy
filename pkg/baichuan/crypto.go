@@ -1,6 +1,7 @@
 package baichuan
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/md5" //#nosec G501
@@ -106,6 +107,33 @@ func decryptXML(offset uint8, buf []byte, mode EncryptionMode, aesKey [16]byte, 
 	default:
 		return append([]byte(nil), buf...)
 	}
+}
+
+// decryptXMLAuto decrypts with the session mode and falls back to the other
+// modes when the result is not XML (reolink_aio does the same). Messages may
+// deviate from the negotiated mode: the modern login reply is BC-encrypted
+// even on AES sessions, matching the BC-encrypted login request.
+func decryptXMLAuto(offset uint8, buf []byte, mode EncryptionMode, aesKey [16]byte, hasAESKey bool) []byte {
+	out := decryptXML(offset, buf, mode, aesKey, hasAESKey)
+	if isXMLPrefix(out) {
+		return out
+	}
+	if isXMLPrefix(buf) {
+		return append([]byte(nil), buf...)
+	}
+	if bc := BCXOR(offset, buf); isXMLPrefix(bc) {
+		return bc
+	}
+	if hasAESKey {
+		if a := aesCFB(buf, aesKey, false); isXMLPrefix(a) {
+			return a
+		}
+	}
+	return out
+}
+
+func isXMLPrefix(buf []byte) bool {
+	return bytes.HasPrefix(bytes.TrimLeft(buf, " \t\r\n"), []byte("<?xml"))
 }
 
 func aesCFB(buf []byte, key [16]byte, encrypt bool) []byte {

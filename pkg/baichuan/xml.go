@@ -114,9 +114,12 @@ func buildStopPreviewXML(channel uint8, handle uint32) ([]byte, error) {
 // the authoritative source for the device class (reolink_aio derives is_nvr
 // from it; GetDevInfo's "type" is just the model name).
 type LoginDeviceInfo struct {
-	Type       string
-	TypeInfo   string
-	ChannelNum int
+	Type     string
+	TypeInfo string
+	// ChannelNum counts stream channels, AnalogChnNum real channels — a
+	// dual-lens camera (TrackMix, RLC-81MA) reports 2/1.
+	ChannelNum   int
+	AnalogChnNum int
 }
 
 // IsNVR reports whether the device is a multi-channel host (NVR/Hub) rather
@@ -133,11 +136,18 @@ func (i LoginDeviceInfo) IsNVR() bool {
 	return false
 }
 
+// IsDualLens reports a standalone camera with more stream channels than real
+// channels: both lenses alarm and stream under the same camera.
+func (i LoginDeviceInfo) IsDualLens() bool {
+	return !i.IsNVR() && i.AnalogChnNum > 0 && i.ChannelNum > i.AnalogChnNum
+}
+
 type xmlLoginDeviceInfo struct {
 	DeviceInfo *struct {
-		Type       string `xml:"type"`
-		TypeInfo   string `xml:"typeInfo"`
-		ChannelNum int    `xml:"channelNum"`
+		Type         string `xml:"type"`
+		TypeInfo     string `xml:"typeInfo"`
+		ChannelNum   int    `xml:"channelNum"`
+		AnalogChnNum int    `xml:"analogChnNum"`
 	} `xml:"DeviceInfo"`
 }
 
@@ -147,9 +157,10 @@ func parseLoginDeviceInfo(xmlText string) LoginDeviceInfo {
 		return LoginDeviceInfo{}
 	}
 	return LoginDeviceInfo{
-		Type:       body.DeviceInfo.Type,
-		TypeInfo:   body.DeviceInfo.TypeInfo,
-		ChannelNum: body.DeviceInfo.ChannelNum,
+		Type:         body.DeviceInfo.Type,
+		TypeInfo:     body.DeviceInfo.TypeInfo,
+		ChannelNum:   body.DeviceInfo.ChannelNum,
+		AnalogChnNum: body.DeviceInfo.AnalogChnNum,
 	}
 }
 

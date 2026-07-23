@@ -28,6 +28,9 @@ type cameraDevice struct {
 
 	mu     sync.Mutex
 	client *baichuan.Client
+	// dualLens caches the last login's dual-lens flag so webhook pushes can
+	// be parsed while the camera sleeps
+	dualLens bool
 }
 
 func newCameraDevice(cameraName string, cfg baichuan.Config, reconnectBackoff time.Duration, log Logger) *cameraDevice {
@@ -63,10 +66,17 @@ func (m *cameraDevice) Ensure(ctx context.Context) (*baichuan.Client, error) {
 	}
 
 	m.client = client
+	m.dualLens = client.LoginDeviceInfo().IsDualLens()
 	if m.onState != nil {
 		go m.onState(true)
 	}
 	return client, nil
+}
+
+func (m *cameraDevice) DualLens() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.dualLens
 }
 
 func (m *cameraDevice) WithClient(ctx context.Context, fn func(*baichuan.Client) error) error {

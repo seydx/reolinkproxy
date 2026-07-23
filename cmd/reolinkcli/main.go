@@ -129,6 +129,9 @@ func main() {
 		exitOn(err)
 		fmt.Printf("name:     %s\ntype:     %s\nserial:   %s\nhardware: %s\nfirmware: %s\nitemNo:   %s\ndetail:   %s\n",
 			info.Name, info.Type, info.SerialNumber, info.HardwareVersion, info.FirmwareVersion, info.ItemNo, info.Detail)
+		// login := client.LoginDeviceInfo()
+		// fmt.Printf("class:    type=%s typeInfo=%s streamChannels=%d analogChannels=%d nvr=%t dualLens=%t\n",
+		// 	login.Type, login.TypeInfo, login.ChannelNum, login.AnalogChnNum, login.IsNVR(), login.IsDualLens())
 
 	case "abilities":
 		xmlText, err := client.AbilityInfoXML(ctx)

@@ -3,6 +3,7 @@ package baichuan
 import (
 	"context"
 	"encoding/xml"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -63,6 +64,10 @@ func (c *Client) ListenForAlarms(ctx context.Context, channel uint8, callback fu
 		return nil, err
 	}
 
+	// dual-lens cameras may alarm on the telephoto stream channel, both
+	// lenses belong to this camera
+	dualLens := c.LoginDeviceInfo().IsDualLens()
+
 	motionSub, unsubscribeMotion := c.Subscribe(msgIDMotion)
 	stop := make(chan struct{})
 
@@ -81,7 +86,7 @@ func (c *Client) ListenForAlarms(ctx context.Context, channel uint8, callback fu
 				if msg == nil {
 					continue
 				}
-				state, matched, err := parseAlarmState(msg.XML, channel)
+				state, matched, err := parseAlarmState(msg.XML, channel, dualLens)
 				if err == nil && matched {
 					callback(state)
 				}
@@ -97,7 +102,7 @@ func (c *Client) ListenForAlarms(ctx context.Context, channel uint8, callback fu
 	}, nil
 }
 
-func parseAlarmState(xmlText string, channel uint8) (AlarmState, bool, error) {
+func parseAlarmState(xmlText string, channel uint8, anyChannel bool) (AlarmState, bool, error) {
 	if xmlText == "" {
 		return AlarmState{}, false, nil
 	}
@@ -111,24 +116,32 @@ func parseAlarmState(xmlText string, channel uint8) (AlarmState, bool, error) {
 		return AlarmState{}, false, nil
 	}
 
+	var state AlarmState
+	matched := false
 	for _, ev := range payload.AlarmEventList.AlarmEvents {
-		if ev.ChannelID != channel {
+		if !anyChannel && ev.ChannelID != channel {
 			continue
 		}
-		state := AlarmState{
-			MotionDetected: strings.Contains(ev.Status, "MD"),
-			Visitor:        strings.Contains(ev.Status, "visitor"),
-			AITypes:        parseAITypes(ev.AIType),
+		matched = true
+		if strings.Contains(ev.Status, "MD") {
+			state.MotionDetected = true
+		}
+		if strings.Contains(ev.Status, "visitor") {
+			state.Visitor = true
 		}
 		// PIR-style cameras report unclassified detections as AI type
 		// "other" instead of an MD status.
-		if !state.MotionDetected && strings.Contains(ev.AIType, "other") {
+		if strings.Contains(ev.AIType, "other") {
 			state.MotionDetected = true
 		}
-		return state, true, nil
+		for _, aiType := range parseAITypes(ev.AIType) {
+			if !slices.Contains(state.AITypes, aiType) {
+				state.AITypes = append(state.AITypes, aiType)
+			}
+		}
 	}
 
-	return AlarmState{}, false, nil
+	return state, matched, nil
 }
 
 // parseAITypes splits the AItype field ("people", "people&vehicle", …) into

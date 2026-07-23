@@ -101,7 +101,7 @@ func (c *Client) readMessage() (*Message, error) {
 	var extension []byte
 	prePayloadXML := ""
 	if len(extEncrypted) > 0 {
-		extension = decryptXML(header.ChannelID, extEncrypted, mode, aesKey, hasAESKey)
+		extension = decryptXMLAuto(header.ChannelID, extEncrypted, mode, aesKey, hasAESKey)
 		prePayloadXML = trimXML(extension)
 	}
 
@@ -132,7 +132,7 @@ func (c *Client) readMessage() (*Message, error) {
 			}
 			xmlText = prePayloadXML
 		} else {
-			payload = decryptXML(header.ChannelID, payloadEncrypted, mode, aesKey, hasAESKey)
+			payload = decryptXMLAuto(header.ChannelID, payloadEncrypted, mode, aesKey, hasAESKey)
 			xmlText = trimXML(payload)
 		}
 	}

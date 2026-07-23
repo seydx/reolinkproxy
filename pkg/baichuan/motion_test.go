@@ -10,7 +10,7 @@ func TestParseAlarmStateMatchingChannel(t *testing.T) {
 
 	xmlText := `<?xml version="1.0" encoding="utf-8"?><body><AlarmEventList><AlarmEvent><channelId>0</channelId><status>none</status><AItype>none</AItype></AlarmEvent></AlarmEventList></body>`
 
-	state, matched, err := parseAlarmState(xmlText, 0)
+	state, matched, err := parseAlarmState(xmlText, 0, false)
 	if err != nil {
 		t.Fatalf("parseAlarmState() error = %v", err)
 	}
@@ -27,7 +27,7 @@ func TestParseAlarmStateIgnoresOtherChannels(t *testing.T) {
 
 	xmlText := `<?xml version="1.0" encoding="utf-8"?><body><AlarmEventList><AlarmEvent><channelId>1</channelId><status>MD</status><AItype>people</AItype></AlarmEvent></AlarmEventList></body>`
 
-	state, matched, err := parseAlarmState(xmlText, 0)
+	state, matched, err := parseAlarmState(xmlText, 0, false)
 	if err != nil {
 		t.Fatalf("parseAlarmState() error = %v", err)
 	}
@@ -44,7 +44,7 @@ func TestParseAlarmStateDecodesAITypes(t *testing.T) {
 
 	xmlText := `<?xml version="1.0" encoding="utf-8"?><body><AlarmEventList><AlarmEvent><channelId>0</channelId><status>MD</status><AItype>people&amp;vehicle</AItype></AlarmEvent></AlarmEventList></body>`
 
-	state, matched, err := parseAlarmState(xmlText, 0)
+	state, matched, err := parseAlarmState(xmlText, 0, false)
 	if err != nil {
 		t.Fatalf("parseAlarmState() error = %v", err)
 	}
@@ -64,7 +64,7 @@ func TestParseAlarmStateVisitorWithoutMotion(t *testing.T) {
 
 	xmlText := `<?xml version="1.0" encoding="utf-8"?><body><AlarmEventList><AlarmEvent><channelId>0</channelId><status>visitor</status><AItype>none</AItype></AlarmEvent></AlarmEventList></body>`
 
-	state, matched, err := parseAlarmState(xmlText, 0)
+	state, matched, err := parseAlarmState(xmlText, 0, false)
 	if err != nil {
 		t.Fatalf("parseAlarmState() error = %v", err)
 	}
@@ -87,7 +87,7 @@ func TestParseAlarmStateOtherAITypeCountsAsMotion(t *testing.T) {
 
 	xmlText := `<?xml version="1.0" encoding="utf-8"?><body><AlarmEventList><AlarmEvent><channelId>0</channelId><status>none</status><AItype>other</AItype></AlarmEvent></AlarmEventList></body>`
 
-	state, matched, err := parseAlarmState(xmlText, 0)
+	state, matched, err := parseAlarmState(xmlText, 0, false)
 	if err != nil {
 		t.Fatalf("parseAlarmState() error = %v", err)
 	}
@@ -99,6 +99,47 @@ func TestParseAlarmStateOtherAITypeCountsAsMotion(t *testing.T) {
 	}
 	if len(state.AITypes) != 0 {
 		t.Fatalf("parseAlarmState() aiTypes = %v, want empty", state.AITypes)
+	}
+}
+
+func TestParseAlarmStateDualLensMergesStreamChannels(t *testing.T) {
+	t.Parallel()
+
+	xmlText := `<?xml version="1.0" encoding="utf-8"?><body><AlarmEventList><AlarmEvent><channelId>0</channelId><status>none</status><AItype>people</AItype></AlarmEvent><AlarmEvent><channelId>1</channelId><status>MD</status><AItype>people&amp;vehicle</AItype></AlarmEvent></AlarmEventList></body>`
+
+	state, matched, err := parseAlarmState(xmlText, 0, true)
+	if err != nil {
+		t.Fatalf("parseAlarmState() error = %v", err)
+	}
+	if !matched {
+		t.Fatalf("parseAlarmState() matched = false, want true")
+	}
+	if !state.MotionDetected {
+		t.Fatalf("parseAlarmState() motionDetected = false, want true")
+	}
+	if !slices.Equal(state.AITypes, []string{"people", "vehicle"}) {
+		t.Fatalf("parseAlarmState() aiTypes = %v, want [people vehicle]", state.AITypes)
+	}
+}
+
+func TestLoginDeviceInfoDualLens(t *testing.T) {
+	t.Parallel()
+
+	dual := LoginDeviceInfo{Type: "camera", ChannelNum: 2, AnalogChnNum: 1}
+	if !dual.IsDualLens() {
+		t.Fatalf("IsDualLens() = false, want true for 2 stream / 1 analog")
+	}
+	single := LoginDeviceInfo{Type: "camera", ChannelNum: 1, AnalogChnNum: 1}
+	if single.IsDualLens() {
+		t.Fatalf("IsDualLens() = true, want false for 1/1")
+	}
+	noAnalog := LoginDeviceInfo{Type: "camera", ChannelNum: 2}
+	if noAnalog.IsDualLens() {
+		t.Fatalf("IsDualLens() = true, want false without analogChnNum")
+	}
+	nvr := LoginDeviceInfo{Type: "nvr", ChannelNum: 36, AnalogChnNum: 16}
+	if nvr.IsDualLens() {
+		t.Fatalf("IsDualLens() = true, want false for NVR")
 	}
 }
 

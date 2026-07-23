@@ -90,9 +90,10 @@ func ParseWebhookPush(body []byte) (WebhookPush, error) {
 
 // ParseAlarmStateXML decodes an alarm push XML body (cmd 33) for a channel,
 // e.g. from a webhook push. matched is false when the payload carries no
-// event for the channel.
-func ParseAlarmStateXML(xmlText string, channel uint8) (state AlarmState, matched bool, err error) {
-	return parseAlarmState(xmlText, channel)
+// event for the channel. anyChannel merges events regardless of their
+// channel ID, for dual-lens cameras alarming on the telephoto stream channel.
+func ParseAlarmStateXML(xmlText string, channel uint8, anyChannel bool) (state AlarmState, matched bool, err error) {
+	return parseAlarmState(xmlText, channel, anyChannel)
 }
 
 // ParseBatteryXML decodes a battery push XML body (cmd 252/253), e.g. from a
