@@ -40,9 +40,10 @@ type cameraEvents struct {
 	onConnection func(connected bool)
 	onSleep      func(sleeping bool)
 
-	lastVisitor bool
-	lastMotion  *MotionEvent
-	lastSleep   *bool
+	lastVisitor    bool
+	lastMotion     *MotionEvent
+	lastSleep      *bool
+	lastConnection *bool
 }
 
 // OnMotion registers the handler invoked on motion/AI state changes.
@@ -67,11 +68,17 @@ func (c *Camera) OnBattery(fn func(BatteryState)) {
 }
 
 // OnConnection registers the handler invoked when the Baichuan connection is
-// established (true) or lost (false).
+// established (true) or lost (false). AddCamera already starts connecting, so
+// a state reached before this call is replayed instead of lost.
 func (c *Camera) OnConnection(fn func(connected bool)) {
 	c.events.mu.Lock()
-	defer c.events.mu.Unlock()
 	c.events.onConnection = fn
+	last := c.events.lastConnection
+	c.events.mu.Unlock()
+
+	if fn != nil && last != nil {
+		fn(*last)
+	}
 }
 
 // OnSleep registers the handler invoked when a battery camera enters (true)
@@ -138,6 +145,7 @@ func (c *Camera) handleBattery(info baichuan.BatteryInfo) {
 
 func (c *Camera) handleConnection(connected bool) {
 	c.events.mu.Lock()
+	c.events.lastConnection = &connected
 	onConnection := c.events.onConnection
 	c.events.mu.Unlock()
 
