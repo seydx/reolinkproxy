@@ -19,9 +19,10 @@ type DiscoveredDevice struct {
 }
 
 const (
-	discoveryPingPort   = 2000
-	discoveryListenPort = 3000
-	discoveryReplyLen   = 388
+	discoveryPingPort     = 2000
+	discoveryListenPort   = 3000
+	discoveryReplyLen     = 388
+	discoveryPingInterval = 500 * time.Millisecond
 )
 
 // discoveryPing is the 4-byte magic the cameras expect; replies echo it as a
@@ -62,7 +63,7 @@ func Discover(ctx context.Context, timeout time.Duration) ([]DiscoveredDevice, e
 		}
 	}
 	sendPing()
-	nextPing := time.Now().Add(time.Second)
+	nextPing := time.Now().Add(discoveryPingInterval)
 
 	var devices []DiscoveredDevice
 	seen := make(map[string]struct{})
@@ -78,7 +79,7 @@ func Discover(ctx context.Context, timeout time.Duration) ([]DiscoveredDevice, e
 		}
 		if now.After(nextPing) {
 			sendPing()
-			nextPing = now.Add(time.Second)
+			nextPing = now.Add(discoveryPingInterval)
 		}
 
 		readDeadline := nextPing
