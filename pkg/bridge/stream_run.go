@@ -14,6 +14,19 @@ import (
 	"github.com/shareed2k/reolinkproxy/pkg/media"
 )
 
+const (
+	// describeReadyTimeout is how long a DESCRIBE is held while the path is not
+	// exposed yet. Everything before setReady (first keyframe plus the audio
+	// window) has to fit in here, or clients time out instead of waiting.
+	describeReadyTimeout = 10 * time.Second
+	// audioProbeWindow gives a stream whose audio is unknown or expected enough
+	// time to prove it, while leaving room for a long-GOP first keyframe.
+	audioProbeWindow = 5 * time.Second
+	// audioSilentWindow exposes a stream that had no audio last time quickly,
+	// while still leaving room for audio that was switched on since.
+	audioSilentWindow = 2 * time.Second
+)
+
 //nolint:gocyclo
 func (b *Bridge) runStream(
 	ctx context.Context,
@@ -25,7 +38,8 @@ func (b *Bridge) runStream(
 	pauseCfg streamPauseConfig,
 	wantStream func() bool,
 ) {
-	log := b.log
+	// per-camera logger, so stream and pacer messages name the camera they belong to
+	log := device.log
 	logPackets := b.opts.LogPackets
 	var (
 		firstVideo       bool
@@ -44,9 +58,14 @@ func (b *Bridge) runStream(
 		Control: "trackID=0",
 	}
 
-	// Audio-decision window: the RTSP session goes video-only if no audio
-	// shows up within 2s of the FIRST packet (not goroutine start — the
-	// camera may take a while to connect at all).
+	// Audio-decision window: the RTSP session goes video-only if no audio shows
+	// up in time, and that verdict holds for the whole session. Streams whose
+	// audio is unknown or known-present get the patient window, a stream that
+	// had no audio last time is exposed quickly.
+	audioWindow := audioProbeWindow
+	if seen, known := device.audioKnown(stream); known && !seen {
+		audioWindow = audioSilentWindow
+	}
 	var startupDeadline time.Time
 
 	var videoPace videoPaceState
@@ -65,12 +84,14 @@ func (b *Bridge) runStream(
 		maxLead:        b.opts.AudioPacerMaxLead,
 		initialLatency: b.opts.AudioPacerInitialLatency,
 		snapOnPast:     true,
+		dropOldest:     true,
 		handler:        handler,
 		log:            log,
 	}
 	go audioPacer.run(ctx)
 
-	audio := &audioPublisher{audioPacer: audioPacer, log: log}
+	// audio that misses the window still teaches the next session to be patient
+	audio := &audioPublisher{audioPacer: audioPacer, log: log, onLateAudio: func() { device.setAudioKnown(stream, true) }}
 
 	emitVideo := func(pkts []*rtp.Packet, continuousUS uint64) {
 		if len(pkts) == 0 {
@@ -107,9 +128,6 @@ func (b *Bridge) runStream(
 		case packet, ok := <-streamCh:
 			if !ok {
 				return
-			}
-			if startupDeadline.IsZero() {
-				startupDeadline = time.Now().Add(2 * time.Second)
 			}
 
 			switch packet.Kind {
@@ -204,6 +222,9 @@ func (b *Bridge) runStream(
 						}
 						continue
 					}
+					if startupDeadline.IsZero() {
+						startupDeadline = time.Now().Add(audioWindow)
+					}
 					if audio.awaitingStartupDecision(startupDeadline) {
 						continue
 					}
@@ -212,6 +233,7 @@ func (b *Bridge) runStream(
 						log.Infof("stream %s prepare rtsp stream: %v", meta.name, err)
 						continue
 					}
+					device.setAudioKnown(stream, audio.ready())
 				}
 
 				streamPaused := updatePauseState(time.Now())

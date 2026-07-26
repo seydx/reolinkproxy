@@ -181,6 +181,10 @@ func (b *Bridge) AddCamera(cfg CameraConfig) (*Camera, error) {
 	if cfg.BatteryCamera {
 		reconnectBackoff = 30 * time.Second
 	}
+	camLog := b.log
+	if cfg.Logger != nil {
+		camLog = cfg.Logger
+	}
 	device := newCameraDevice(cfg.Name, baichuan.Config{
 		Host:     cfg.Host,
 		Port:     cfg.Port,
@@ -188,7 +192,7 @@ func (b *Bridge) AddCamera(cfg CameraConfig) (*Camera, error) {
 		Username: cfg.Username,
 		Password: cfg.Password,
 		Timeout:  cfg.Timeout,
-	}, reconnectBackoff, b.log)
+	}, reconnectBackoff, camLog)
 
 	talkPath := talkPathForCamera(cfg.RTSPPath)
 	talkPublisher := newRTSPTalkPublisher(

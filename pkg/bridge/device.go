@@ -31,6 +31,27 @@ type cameraDevice struct {
 	// dualLens caches the last login's dual-lens flag so webhook pushes can
 	// be parsed while the camera sleeps
 	dualLens bool
+	// audioSeen remembers per stream whether audio ever showed up, so a stream
+	// that carries audio gets the patient startup window on every restart
+	audioSeen map[baichuan.Stream]bool
+}
+
+// audioKnown reports the remembered audio verdict for a stream, and whether
+// one exists yet.
+func (m *cameraDevice) audioKnown(stream baichuan.Stream) (bool, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	seen, ok := m.audioSeen[stream]
+	return seen, ok
+}
+
+func (m *cameraDevice) setAudioKnown(stream baichuan.Stream, seen bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.audioSeen == nil {
+		m.audioSeen = make(map[baichuan.Stream]bool)
+	}
+	m.audioSeen[stream] = seen
 }
 
 func newCameraDevice(cameraName string, cfg baichuan.Config, reconnectBackoff time.Duration, log Logger) *cameraDevice {

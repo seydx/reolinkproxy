@@ -252,6 +252,8 @@ func (c *Client) Login(ctx context.Context) error {
 func (c *Client) keepAliveLoop() {
 	defer c.wg.Done()
 
+	const pingTimeout = 4 * time.Second
+
 	interval := 5 * time.Second
 	if c.isUDP {
 		interval = 500 * time.Millisecond
@@ -259,6 +261,12 @@ func (c *Client) keepAliveLoop() {
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+
+	// A half-open TCP connection (camera lost power, NAT dropped the mapping)
+	// stays readable forever, so the ping is answered or the link is dead.
+	// One missed reply can be a busy camera, three in a row is not.
+	const maxPingFailures = 3
+	pingFailures := 0
 
 	for {
 		select {
@@ -269,12 +277,26 @@ func (c *Client) keepAliveLoop() {
 					ChannelID: channelIDHost,
 					Class:     classModernWithOffset,
 				})
-			} else {
-				_ = c.sendNoReply(request{
-					MsgID:     msgIDPing,
-					ChannelID: channelIDHost,
-					Class:     classModernWithOffset,
-				})
+				continue
+			}
+
+			pingCtx, cancel := context.WithTimeout(context.Background(), pingTimeout)
+			_, err := c.sendRequest(pingCtx, request{
+				MsgID:     msgIDPing,
+				ChannelID: channelIDHost,
+				Class:     classModernWithOffset,
+			})
+			cancel()
+
+			if err == nil {
+				pingFailures = 0
+				continue
+			}
+
+			pingFailures++
+			if pingFailures >= maxPingFailures {
+				c.shutdown(fmt.Errorf("ping failed %d consecutive times: %w", maxPingFailures, err))
+				return
 			}
 		case <-c.closed:
 			return

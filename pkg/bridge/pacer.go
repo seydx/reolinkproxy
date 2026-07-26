@@ -52,6 +52,7 @@ type mediaPacer struct {
 	maxLead        time.Duration
 	initialLatency time.Duration
 	snapOnPast     bool
+	dropOldest     bool
 	handler        *rtspStreamHandler
 	log            Logger
 
@@ -59,14 +60,32 @@ type mediaPacer struct {
 	lastOverflowLog time.Time
 }
 
-// enqueue sends a paced frame to the pacer goroutine. If the channel is full,
-// the frame is dropped and overflow is logged at most once per minute.
+// enqueue sends a paced frame to the pacer goroutine. A full queue drops the
+// oldest frame when dropOldest is set, otherwise the incoming one. Overflow is
+// logged at most once per minute.
 func (p *mediaPacer) enqueue(item pacedFrame) {
 	select {
 	case p.ch <- item:
+		return
 	default:
-		p.warnOverflowOnce()
 	}
+
+	// a pacer that never burst-drains would hold the backlog forever, so make
+	// room instead of discarding what just arrived
+	if p.dropOldest {
+		select {
+		case <-p.ch:
+		default:
+		}
+		select {
+		case p.ch <- item:
+			p.warnOverflowOnce()
+			return
+		default:
+		}
+	}
+
+	p.warnOverflowOnce()
 }
 
 // warnOverflowOnce logs a queue-overflow warning, rate-limited to once per

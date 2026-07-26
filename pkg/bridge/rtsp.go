@@ -140,8 +140,8 @@ func (h *rtspServerHandler) OnDescribe(ctx *gortsplib.ServerHandlerOnDescribeCtx
 	if stream != nil {
 		stream.touchInterest()
 
-		// Wait up to 10 seconds for the stream to become ready (VPS/SPS/PPS extracted)
-		deadline := time.Now().Add(10 * time.Second)
+		// Wait for the stream to become ready (parameter sets extracted, audio decided)
+		deadline := time.Now().Add(describeReadyTimeout)
 		for time.Now().Before(deadline) {
 			stream.touchInterest()
 			stream.mu.RLock()
@@ -488,6 +488,7 @@ type audioPublisher struct {
 	adpcmDecoder   *codec.ADPCMDecoder
 	audioPacer     *mediaPacer
 	log            Logger
+	onLateAudio    func()
 	nextTimestamp  uint32
 	timestampGuard rtpTimestampGuard
 	unsupported    bool
@@ -534,6 +535,9 @@ func (p *audioPublisher) processAAC(data []byte, timestamp mediaTimestamp, handl
 			if !p.lateIgnored {
 				p.lateIgnored = true
 				p.log.Warnf("audio arrived after RTSP session creation; keeping stream video-only")
+				if p.onLateAudio != nil {
+					p.onLateAudio()
+				}
 			}
 			return nil
 		}
@@ -612,6 +616,9 @@ func (p *audioPublisher) processADPCM(data []byte, timestamp mediaTimestamp, han
 			if !p.lateIgnored {
 				p.lateIgnored = true
 				p.log.Warnf("audio arrived after RTSP session creation; keeping stream video-only")
+				if p.onLateAudio != nil {
+					p.onLateAudio()
+				}
 			}
 			return nil
 		}

@@ -10,6 +10,9 @@ import (
 type CameraConfig struct {
 	// Name identifies the camera and doubles as the default RTSP path prefix.
 	Name string
+	// Logger receives everything logged for this camera (connection, streams,
+	// pacer). Falls back to the bridge logger when nil.
+	Logger Logger
 	// Host is the camera IP for direct Baichuan TCP. Takes precedence over UID.
 	Host string
 	// Port is the Baichuan TCP port (default 9000).
