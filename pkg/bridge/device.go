@@ -286,6 +286,7 @@ type eventHandlers struct {
 	alarm             func(baichuan.AlarmState)
 	battery           func(baichuan.BatteryInfo)
 	sleep             func(sleeping bool)
+	floodlight        func(on bool)
 	motionUnsupported func()
 	// pollBattery queries the battery state once per (re)connect so the
 	// consumer has a value before the first spontaneous push.
@@ -338,6 +339,11 @@ func (m *cameraDevice) WatchEvents(ctx context.Context, channel uint8, handlers 
 				cancelSleep = client.ListenForSleep(ctx, channel, handlers.sleep)
 			}
 
+			cancelFloodlight := func() {}
+			if handlers.floodlight != nil {
+				cancelFloodlight = client.ListenForFloodlight(ctx, channel, handlers.floodlight)
+			}
+
 			m.setupWebhookAndBatteryPoll(ctx, client, channel, handlers)
 
 			if motionUnsupported && handlers.battery == nil {
@@ -348,6 +354,7 @@ func (m *cameraDevice) WatchEvents(ctx context.Context, channel uint8, handlers 
 				cancelAlarms()
 				cancelBattery()
 				cancelSleep()
+				cancelFloodlight()
 			}
 
 			select {

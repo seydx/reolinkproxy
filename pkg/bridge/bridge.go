@@ -227,9 +227,10 @@ func (b *Bridge) AddCamera(cfg CameraConfig) (*Camera, error) {
 	// already reports its connection state.
 	device.onState = cam.handleConnection
 	device.WatchEvents(ctx, uint8(cfg.Channel), eventHandlers{ //#nosec G115
-		alarm:   cam.handleAlarm,
-		battery: cam.handleBattery,
-		sleep:   cam.handleSleep,
+		alarm:      cam.handleAlarm,
+		battery:    cam.handleBattery,
+		sleep:      cam.handleSleep,
+		floodlight: cam.handleFloodlight,
 		motionUnsupported: func() {
 			if motionState != nil {
 				motionState.markUnsupported()

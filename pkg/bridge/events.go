@@ -39,10 +39,12 @@ type cameraEvents struct {
 	onBattery    func(BatteryState)
 	onConnection func(connected bool)
 	onSleep      func(sleeping bool)
+	onFloodlight func(on bool)
 
 	lastVisitor    bool
 	lastMotion     *MotionEvent
 	lastSleep      *bool
+	lastFloodlight *bool
 	lastConnection *bool
 }
 
@@ -87,6 +89,27 @@ func (c *Camera) OnSleep(fn func(sleeping bool)) {
 	c.events.mu.Lock()
 	defer c.events.mu.Unlock()
 	c.events.onSleep = fn
+}
+
+// OnFloodlight registers the handler invoked when the camera reports its
+// spotlight state, including changes it made on its own.
+func (c *Camera) OnFloodlight(fn func(on bool)) {
+	c.events.mu.Lock()
+	defer c.events.mu.Unlock()
+	c.events.onFloodlight = fn
+}
+
+// handleFloodlight dispatches deduplicated spotlight-state changes.
+func (c *Camera) handleFloodlight(on bool) {
+	c.events.mu.Lock()
+	changed := c.events.lastFloodlight == nil || *c.events.lastFloodlight != on
+	c.events.lastFloodlight = &on
+	onFloodlight := c.events.onFloodlight
+	c.events.mu.Unlock()
+
+	if changed && onFloodlight != nil {
+		onFloodlight(on)
+	}
 }
 
 // handleSleep dispatches deduplicated sleep-state changes.

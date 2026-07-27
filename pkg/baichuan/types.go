@@ -56,6 +56,7 @@ const (
 	msgIDSirenSet                 = 265
 	msgIDFloodlightManual         = 288
 	msgIDWhiteLedGet              = 289
+	msgIDFloodlightStatus         = 291
 	msgIDAiAlarmGet               = 342
 	msgIDAiAlarmSet               = 343
 	msgIDQuickReplyPlay           = 349
