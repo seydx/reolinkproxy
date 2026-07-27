@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/bluenviron/gortsplib/v5"
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
@@ -27,15 +26,19 @@ type rtspTalkPublisher struct {
 	stream *gortsplib.ServerStream
 }
 
+// rtspTalkSessionState is the camera's single talk bridge. go2rtc opens two
+// RTSP sessions on the two-way path (the reconnected producer and a separate
+// consumer for the audio) and either may carry the speech, so every session
+// feeds this one bridge instead of replacing the others.
 type rtspTalkSessionState struct {
 	publisher *rtspTalkPublisher
-	session   *gortsplib.ServerSession
 	path      string
 	ctx       context.Context
 	cancel    context.CancelFunc
 	pcmCh     chan []int16
 	done      chan struct{}
 	stopOnce  sync.Once
+	refs      int // sessions feeding this bridge, guarded by publisher.mu
 }
 
 const rtspTalkPCMQueueSize = 256
@@ -151,61 +154,61 @@ func (p *rtspTalkPublisher) announce(ctx *gortsplib.ServerHandlerOnAnnounceCtx) 
 	return &base.Response{StatusCode: base.StatusOK}, nil
 }
 
-func (p *rtspTalkPublisher) ensureSessionState(session *gortsplib.ServerSession) (*rtspSessionState, *rtspTalkSessionState) {
+// ensureSessionState attaches the session to the camera's talk bridge, creating
+// the bridge on first use. The bool reports whether this call created it, so
+// only one pipeline goroutine is started.
+func (p *rtspTalkPublisher) ensureSessionState(session *gortsplib.ServerSession) (*rtspSessionState, *rtspTalkSessionState, bool) {
 	state := attachSessionState(session)
-	if state != nil && state.talk != nil && state.talk.publisher == p && state.talk.session == session {
-		return state, state.talk
+	if state == nil {
+		return nil, nil, false
+	}
+	if state.talk != nil && state.talk.publisher == p {
+		return state, state.talk, false
 	}
 
-	var active *rtspTalkSessionState
-	for {
-		p.mu.Lock()
-		if p.active != nil {
-			select {
-			case <-p.active.ctx.Done():
-				p.active = nil
-			default:
-			}
-		}
-		if p.active == nil {
-			bridgeCtx, cancel := context.WithCancel(context.Background())
-			state.talk = &rtspTalkSessionState{
-				publisher: p,
-				session:   session,
-				ctx:       bridgeCtx,
-				cancel:    cancel,
-				pcmCh:     make(chan []int16, rtspTalkPCMQueueSize),
-				done:      make(chan struct{}),
-			}
-			p.active = state.talk
-			active = state.talk
-			p.mu.Unlock()
-			break
-		}
-		if p.active.session == session {
-			state.talk = p.active
-			active = state.talk
-			p.mu.Unlock()
-			break
-		}
-		prev := p.active
-		p.mu.Unlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
-		p.log.Debugf("talk %s replacing previous rtsp session", p.cameraName)
-		prev.close()
-		if prev.session != nil {
-			if prevState, ok := prev.session.UserData().(*rtspSessionState); ok && prevState != nil && prevState.talk == prev {
-				prevState.talk = nil
-			}
-			closeTalkRTSPSession(prev)
-		}
+	if p.active != nil {
 		select {
-		case <-prev.done:
-		case <-time.After(2 * time.Second):
+		case <-p.active.ctx.Done():
+			p.active = nil
+		default:
 		}
 	}
 
-	return state, active
+	created := p.active == nil
+	if created {
+		bridgeCtx, cancel := context.WithCancel(context.Background())
+		p.active = &rtspTalkSessionState{
+			publisher: p,
+			ctx:       bridgeCtx,
+			cancel:    cancel,
+			pcmCh:     make(chan []int16, rtspTalkPCMQueueSize),
+			done:      make(chan struct{}),
+		}
+	}
+
+	p.active.refs++
+	state.talk = p.active
+	return state, p.active, created
+}
+
+// release drops one session's hold on the talk bridge and tears it down once
+// the last session is gone.
+func (p *rtspTalkPublisher) release(active *rtspTalkSessionState) {
+	if active == nil {
+		return
+	}
+
+	p.mu.Lock()
+	active.refs--
+	last := active.refs <= 0
+	p.mu.Unlock()
+
+	if last {
+		active.close()
+	}
 }
 
 func (p *rtspTalkPublisher) bindInputs(session *gortsplib.ServerSession, inputs []*rtspTalkInput, active *rtspTalkSessionState) *rtspTalkInput {
@@ -249,21 +252,25 @@ func (p *rtspTalkPublisher) bindInputs(session *gortsplib.ServerSession, inputs 
 }
 
 func (p *rtspTalkPublisher) startBridge(session *gortsplib.ServerSession, path string, inputs []*rtspTalkInput) error {
-	state := attachSessionState(session)
-	if state != nil && state.talk != nil && state.talk.publisher == p && state.talk.session == session {
+	if existing := attachSessionState(session); existing != nil && existing.talk != nil && existing.talk.publisher == p {
 		return nil
 	}
 
-	_, active := p.ensureSessionState(session)
-	if active == nil {
+	state, active, created := p.ensureSessionState(session)
+	if state == nil || active == nil {
 		return fmt.Errorf("failed to initialize talk session state")
 	}
-	active.path = strings.TrimPrefix(path, "/")
 
+	// every session feeds the bridge, whichever one the speech arrives on
 	primary := p.bindInputs(session, inputs, active)
 	if primary == nil {
 		return fmt.Errorf("talkback input is not configured")
 	}
+
+	if !created {
+		return nil
+	}
+	active.path = strings.TrimPrefix(path, "/")
 
 	go func() {
 		defer p.finish(active)
@@ -301,17 +308,6 @@ func (p *rtspTalkPublisher) startBackChannel(session *gortsplib.ServerSession, p
 		return err
 	}
 	return p.startBridge(session, path, inputs)
-}
-
-func closeTalkRTSPSession(state *rtspTalkSessionState) {
-	if state == nil || state.session == nil {
-		return
-	}
-	sessionState, ok := state.session.UserData().(*rtspSessionState)
-	if ok && sessionState != nil && sessionState.stream != nil {
-		return
-	}
-	state.session.Close()
 }
 
 func (h *rtspServerHandler) OnAnnounce(ctx *gortsplib.ServerHandlerOnAnnounceCtx) (*base.Response, error) {

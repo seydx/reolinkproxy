@@ -328,3 +328,40 @@ func TestApplyTalkVolume(t *testing.T) {
 		}
 	}
 }
+
+// go2rtc opens two RTSP sessions on the two-way path and the speech can arrive
+// on either, so both must feed the same bridge. Replacing one with the other
+// silently dropped whatever the loser received.
+func TestTalkBridgeIsSharedBySessions(t *testing.T) {
+	t.Parallel()
+
+	publisher := newRTSPTalkPublisher("cam/stream_twoway", "cam", 0, nil, 100, NopLogger{})
+	first := &gortsplib.ServerSession{}
+	second := &gortsplib.ServerSession{}
+
+	_, firstBridge, created := publisher.ensureSessionState(first)
+	if !created {
+		t.Fatal("first session must create the bridge")
+	}
+	_, secondBridge, created := publisher.ensureSessionState(second)
+	if created {
+		t.Fatal("second session must join the bridge, not create a new one")
+	}
+	if firstBridge != secondBridge {
+		t.Fatal("sessions ended up on different bridges")
+	}
+
+	publisher.release(firstBridge)
+	select {
+	case <-firstBridge.ctx.Done():
+		t.Fatal("bridge closed while a session was still feeding it")
+	default:
+	}
+
+	publisher.release(secondBridge)
+	select {
+	case <-secondBridge.ctx.Done():
+	default:
+		t.Fatal("bridge stayed open after the last session left")
+	}
+}

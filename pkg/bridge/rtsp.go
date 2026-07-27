@@ -279,8 +279,8 @@ func (h *rtspServerHandler) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base
 func (h *rtspServerHandler) OnPause(ctx *gortsplib.ServerHandlerOnPauseCtx) (*base.Response, error) {
 	state, ok := ctx.Session.UserData().(*rtspSessionState)
 	hadTalk := ok && state != nil && state.talk != nil
-	if ok && state != nil && state.talk != nil {
-		state.talk.close()
+	if hadTalk {
+		state.talk.publisher.release(state.talk)
 		state.talk = nil
 	}
 	if hadTalk && (state == nil || state.stream == nil) {
@@ -308,9 +308,8 @@ func (h *rtspServerHandler) OnSessionClose(ctx *gortsplib.ServerHandlerOnSession
 		if state.talk != nil {
 			if state.talk.publisher != nil {
 				h.log.Debugf("talk %s rtsp session closed: %v", state.talk.publisher.cameraName, ctx.Error)
-				state.talk.publisher.finish(state.talk)
+				state.talk.publisher.release(state.talk)
 			}
-			state.talk.close()
 			state.talk = nil
 		}
 	}
