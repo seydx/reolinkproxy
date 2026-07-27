@@ -51,6 +51,8 @@ func (b *Bridge) runStream(
 		lastHeight       uint32
 		streamTimestamps timestampUnwrapper
 		videoRTP         rtpTimestampGuard
+		lastVideoUS      uint64
+		haveVideoUS      bool
 	)
 
 	videoMedia := &description.Media{
@@ -68,37 +70,22 @@ func (b *Bridge) runStream(
 	}
 	var startupDeadline time.Time
 
-	var videoPace videoPaceState
-	videoPacer := &mediaPacer{
-		ch:             make(chan pacedFrame, 400),
-		maxLead:        b.opts.VideoPacerMaxLead,
-		initialLatency: b.opts.VideoPacerInitialLatency,
-		snapOnPast:     false,
-		handler:        handler,
-		log:            log,
+	pacer := &mediaPacer{
+		ch:      make(chan pacedFrame, 600),
+		cursor:  paceCursor{maxLead: b.opts.PacerMaxLead, initialLatency: b.opts.PacerInitialLatency},
+		handler: handler,
+		log:     log,
 	}
-	go videoPacer.run(ctx)
-
-	audioPacer := &mediaPacer{
-		ch:             make(chan pacedFrame, 200),
-		maxLead:        b.opts.AudioPacerMaxLead,
-		initialLatency: b.opts.AudioPacerInitialLatency,
-		snapOnPast:     true,
-		dropOldest:     true,
-		handler:        handler,
-		log:            log,
-	}
-	go audioPacer.run(ctx)
+	go pacer.run(ctx)
 
 	// audio that misses the window still teaches the next session to be patient
-	audio := &audioPublisher{audioPacer: audioPacer, log: log, onLateAudio: func() { device.setAudioKnown(stream, true) }}
+	audio := &audioPublisher{audioPacer: pacer, log: log, onLateAudio: func() { device.setAudioKnown(stream, true) }}
 
 	emitVideo := func(pkts []*rtp.Packet, continuousUS uint64) {
 		if len(pkts) == 0 {
 			return
 		}
-		dur := videoPace.durationForFrame(continuousUS)
-		videoPacer.enqueue(pacedFrame{pkts: pkts, media: videoMedia, duration: dur})
+		pacer.enqueue(pacedFrame{pkts: pkts, media: videoMedia, mediaUS: continuousUS})
 	}
 
 	controlTicker := time.NewTicker(time.Second)
@@ -162,6 +149,7 @@ func (b *Bridge) runStream(
 					continue
 				}
 				continuousUS := streamTimestamps.unwrap(packet.TimestampMicrosecs)
+				lastVideoUS, haveVideoUS = continuousUS, true
 
 				if videoFormat == nil {
 					meta.setVideoCodec(packet.Codec)
@@ -270,13 +258,13 @@ func (b *Bridge) runStream(
 				}
 
 			case baichuan.MediaPacketAAC:
-				timestamp := audioTimestampForPacket(packet, &streamTimestamps)
+				timestamp := audioTimestampForPacket(packet, &streamTimestamps, lastVideoUS, haveVideoUS)
 				if err := audio.processAAC(packet.Data, timestamp, handler, meta, !updatePauseState(time.Now())); err != nil {
 					log.Warnf("stream %s audio publish error: %v", meta.name, err)
 				}
 
 			case baichuan.MediaPacketADPCM:
-				timestamp := audioTimestampForPacket(packet, &streamTimestamps)
+				timestamp := audioTimestampForPacket(packet, &streamTimestamps, lastVideoUS, haveVideoUS)
 				if err := audio.processADPCM(packet.Data, timestamp, handler, meta, !updatePauseState(time.Now())); err != nil {
 					log.Warnf("stream %s audio adpcm publish error: %v", meta.name, err)
 				}
@@ -388,13 +376,21 @@ func rtpTimestampBefore(ts uint32, prev uint32) bool {
 	return int32(ts-prev) < 0 //#nosec G115
 }
 
-func audioTimestampForPacket(packet baichuan.MediaPacket, audioTimestamps *timestampUnwrapper) mediaTimestamp {
+// audioTimestampForPacket resolves the media time of an audio packet. AAC
+// frames carry no timestamp of their own, so the video clock anchors them and
+// both tracks end up describing the same media time. Camera audio and video
+// run on one clock (measured: 6.080s of samples against a 6.058s video span),
+// so counting samples keeps them together from that anchor on.
+func audioTimestampForPacket(packet baichuan.MediaPacket, audioTimestamps *timestampUnwrapper, videoUS uint64, haveVideoUS bool) mediaTimestamp {
 	if packet.HasTimestamp {
 		return mediaTimestamp{
 			Microseconds:  audioTimestamps.unwrap(packet.TimestampMicrosecs),
 			Valid:         true,
 			Authoritative: true,
 		}
+	}
+	if haveVideoUS {
+		return mediaTimestamp{Microseconds: videoUS, Valid: true}
 	}
 	return mediaTimestamp{}
 }

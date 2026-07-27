@@ -10,59 +10,60 @@ import (
 )
 
 // pacedFrame is one logical emission: one or more RTP packets sharing the same
-// schedule slot (e.g. one AAC AU or one HEVC AU split across RTP fragments).
+// media time (e.g. one AAC AU or one HEVC AU split across RTP fragments).
 type pacedFrame struct {
-	pkts     []*rtp.Packet
-	media    *description.Media
-	duration time.Duration
+	pkts    []*rtp.Packet
+	media   *description.Media
+	mediaUS uint64
 }
 
-// videoPaceState tracks the previous frame's continuous PTS (microseconds) for
-// computing per-AU pacer durations (ΔPTS → wall spacing).
-type videoPaceState struct {
-	prevUS  uint64
-	hasPrev bool
-}
+// a media time this far from the anchor is a clock jump, not a schedule; the
+// bound also keeps the microsecond arithmetic away from overflow
+const pacerSkewLimit = time.Hour
 
-// durationForFrame returns the wall duration between this frame and the previous
-// emitted video AU. First frame and anomalies (non-increasing or Δ ≥ 5s) yield 0.
-func (s *videoPaceState) durationForFrame(continuousUS uint64) time.Duration {
-	const maxDeltaUS = 5_000_000 // 5s of media time; larger deltas treated as discontinuities
-	if !s.hasPrev {
-		s.hasPrev = true
-		s.prevUS = continuousUS
-		return 0
-	}
-	if continuousUS <= s.prevUS {
-		s.prevUS = continuousUS
-		return 0
-	}
-	delta := continuousUS - s.prevUS
-	s.prevUS = continuousUS
-	if delta >= maxDeltaUS {
-		return 0
-	}
-	return time.Duration(delta) * time.Microsecond
-}
-
-// mediaPacer smooths bursty upstream media onto the wire using an absolute
-// next-emission cursor and wall-clock-relative scheduling.
-type mediaPacer struct {
-	ch             chan pacedFrame
+// paceCursor maps media time to wall time through a single anchor.
+type paceCursor struct {
 	maxLead        time.Duration
 	initialLatency time.Duration
-	snapOnPast     bool
-	dropOldest     bool
-	handler        *rtspStreamHandler
-	log            Logger
+
+	anchorMedia uint64
+	anchorWall  time.Time
+	anchored    bool
+}
+
+// schedule returns when the frame at mediaUS should go out. A target too far
+// ahead means the camera clock jumped, too far behind means we cannot keep up;
+// either way the anchor is worthless, and re-anchoring moves every track
+// together so their spacing survives.
+func (c *paceCursor) schedule(mediaUS uint64, now time.Time) time.Time {
+	if !c.anchored {
+		c.anchorMedia, c.anchorWall, c.anchored = mediaUS, now.Add(c.initialLatency), true
+	}
+
+	target := c.anchorWall.Add(mediaOffset(mediaUS, c.anchorMedia))
+	if target.After(now.Add(c.maxLead)) || target.Before(now.Add(-c.maxLead)) {
+		c.anchorMedia, c.anchorWall = mediaUS, now
+		return now
+	}
+	return target
+}
+
+// mediaPacer smooths bursty upstream media onto the wire. Audio and video share
+// one pacer: with a cursor each, one track drains ahead of the other and the
+// media-time relationship the camera sent them with is lost on the wire.
+type mediaPacer struct {
+	ch      chan pacedFrame
+	cursor  paceCursor
+	handler *rtspStreamHandler
+	log     Logger
 
 	overflowMu      sync.Mutex
 	lastOverflowLog time.Time
 }
 
 // enqueue sends a paced frame to the pacer goroutine. A full queue drops the
-// oldest frame when dropOldest is set, otherwise the incoming one. Overflow is
-// logged at most once per minute.
+// oldest frame, so a stalled writer cannot pin a permanent backlog. Overflow
+// is logged at most once per minute.
 func (p *mediaPacer) enqueue(item pacedFrame) {
 	select {
 	case p.ch <- item:
@@ -70,21 +71,14 @@ func (p *mediaPacer) enqueue(item pacedFrame) {
 	default:
 	}
 
-	// a pacer that never burst-drains would hold the backlog forever, so make
-	// room instead of discarding what just arrived
-	if p.dropOldest {
-		select {
-		case <-p.ch:
-		default:
-		}
-		select {
-		case p.ch <- item:
-			p.warnOverflowOnce()
-			return
-		default:
-		}
+	select {
+	case <-p.ch:
+	default:
 	}
-
+	select {
+	case p.ch <- item:
+	default:
+	}
 	p.warnOverflowOnce()
 }
 
@@ -102,12 +96,8 @@ func (p *mediaPacer) warnOverflowOnce() {
 }
 
 // run drains pacedFrame values from the channel until ctx is cancelled or the
-// channel closes. It waits on an absolute next-emission time, re-anchors the
-// schedule per maxLead / snapOnPast / initialLatency, then writes each RTP
-// packet to the handler and advances the cursor by item.duration.
+// channel closes, emitting each frame at the wall time its media time maps to.
 func (p *mediaPacer) run(ctx context.Context) {
-	var nextEmitAt time.Time
-
 	for {
 		var item pacedFrame
 		select {
@@ -121,26 +111,10 @@ func (p *mediaPacer) run(ctx context.Context) {
 		}
 
 		now := time.Now()
-
-		// Re-anchor:
-		// 1. Cursor too far in the future → snap to now (burst / startup).
-		// 2. Cursor in the past → snap to now only when snapOnPast (audio).
-		//    Otherwise keep the past target so we burst-drain (video slope).
-		var target time.Time
-		switch {
-		case !nextEmitAt.IsZero() && nextEmitAt.After(now.Add(p.maxLead)):
-			target = now
-		case !nextEmitAt.IsZero() && p.snapOnPast && nextEmitAt.Before(now):
-			target = now
-		case !nextEmitAt.IsZero():
-			target = nextEmitAt
-		default:
-			target = now.Add(p.initialLatency)
-		}
+		target := p.cursor.schedule(item.mediaUS, now)
 
 		if target.After(now) {
-			delay := time.Until(target)
-			timer := time.NewTimer(delay)
+			timer := time.NewTimer(time.Until(target))
 			select {
 			case <-ctx.Done():
 				if !timer.Stop() {
@@ -156,22 +130,13 @@ func (p *mediaPacer) run(ctx context.Context) {
 				p.handler.writePacket(item.media, pkt)
 			}
 		}
-
-		// Schedule absolutely from target, not time.Now(), so scheduler
-		// jitter does not drift the RTP↔wall slope.
-		nextEmitAt = addDurationClampOverflow(target, item.duration)
 	}
 }
 
-// addDurationClampOverflow returns t+d, or t if d is non-positive or adding d
-// would overflow time.Time (in which case After would be false).
-func addDurationClampOverflow(t time.Time, d time.Duration) time.Time {
-	if d <= 0 {
-		return t
-	}
-	out := t.Add(d)
-	if !out.After(t) {
-		return t
-	}
-	return out
+// mediaOffset returns how far mediaUS sits from the anchor, clamped so a
+// nonsense timestamp cannot overflow the duration arithmetic.
+func mediaOffset(mediaUS uint64, anchorUS uint64) time.Duration {
+	limit := int64(pacerSkewLimit / time.Microsecond)
+	delta := min(max(int64(mediaUS)-int64(anchorUS), -limit), limit) //#nosec G115
+	return time.Duration(delta) * time.Microsecond
 }

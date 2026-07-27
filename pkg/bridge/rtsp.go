@@ -490,6 +490,8 @@ type audioPublisher struct {
 	log            Logger
 	onLateAudio    func()
 	nextTimestamp  uint32
+	nextMediaUS    uint64
+	anchored       bool
 	timestampGuard rtpTimestampGuard
 	unsupported    bool
 	lateIgnored    bool
@@ -583,18 +585,20 @@ func (p *audioPublisher) processAAC(data []byte, timestamp mediaTimestamp, handl
 
 	duration := uint32(len(aus)) * mpeg4audio.SamplesPerAccessUnit //#nosec G115
 	baseTimestamp := p.nextTimestamp
-	if timestamp.Authoritative && hasExpectedTS {
+	if hasExpectedTS && (timestamp.Authoritative || !p.anchored) {
 		baseTimestamp = expectedTS
+		p.nextMediaUS = timestamp.Microseconds
+		p.anchored = true
 	}
 	baseTimestamp = p.timestampGuard.applyBaseToPackets(pkts, baseTimestamp, duration)
 	for _, pkt := range pkts {
 		pkt.Timestamp += baseTimestamp
 	}
 	samples := len(aus) * mpeg4audio.SamplesPerAccessUnit
-	paceDur := time.Microsecond * time.Duration(int64(samples)*1_000_000/int64(cfg.SampleRate))
-	p.audioPacer.enqueue(pacedFrame{pkts: pkts, media: p.media, duration: paceDur})
+	p.audioPacer.enqueue(pacedFrame{pkts: pkts, media: p.media, mediaUS: p.nextMediaUS})
 
 	p.nextTimestamp = baseTimestamp + duration
+	p.nextMediaUS += uint64(samples) * 1_000_000 / uint64(cfg.SampleRate) //#nosec G115
 	return nil
 }
 
@@ -663,17 +667,19 @@ func (p *audioPublisher) processADPCM(data []byte, timestamp mediaTimestamp, han
 
 	duration := uint32(len(pcm)) //#nosec G115
 	baseTimestamp := p.nextTimestamp
-	if timestamp.Authoritative && hasExpectedTS {
+	if hasExpectedTS && (timestamp.Authoritative || !p.anchored) {
 		baseTimestamp = expectedTS
+		p.nextMediaUS = timestamp.Microseconds
+		p.anchored = true
 	}
 	baseTimestamp = p.timestampGuard.applyBaseToPackets(pkts, baseTimestamp, duration)
 	for _, pkt := range pkts {
 		pkt.Timestamp += baseTimestamp
 	}
-	paceDur := time.Microsecond * time.Duration(int64(len(pcm))*1_000_000/int64(sampleRate))
-	p.audioPacer.enqueue(pacedFrame{pkts: pkts, media: p.media, duration: paceDur})
+	p.audioPacer.enqueue(pacedFrame{pkts: pkts, media: p.media, mediaUS: p.nextMediaUS})
 
 	p.nextTimestamp = baseTimestamp + duration
+	p.nextMediaUS += uint64(len(pcm)) * 1_000_000 / uint64(sampleRate) //#nosec G115
 	return nil
 }
 

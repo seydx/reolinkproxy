@@ -169,18 +169,54 @@ func TestRTPTimestampGuardShiftsAudioPacketBatch(t *testing.T) {
 	}
 }
 
-func TestAudioTimestampForPacketIgnoresFallbackWhenPacketHasNoTimestamp(t *testing.T) {
+func TestAudioTimestampForPacketHasNoTimeBeforeFirstVideoFrame(t *testing.T) {
 	t.Parallel()
 
 	var streamTimestamps timestampUnwrapper
 
-	got := audioTimestampForPacket(baichuan.MediaPacket{Kind: baichuan.MediaPacketAAC}, &streamTimestamps)
+	got := audioTimestampForPacket(baichuan.MediaPacket{Kind: baichuan.MediaPacketAAC}, &streamTimestamps, 0, false)
 	want := mediaTimestamp{}
 	if got != want {
 		t.Fatalf("audioTimestampForPacket() = %+v, want %+v", got, want)
 	}
 	if streamTimestamps.highest != 0 {
 		t.Fatalf("streamTimestamps.highest = %d, want 0", streamTimestamps.highest)
+	}
+}
+
+func TestAudioTimestampForPacketAnchorsToVideoClock(t *testing.T) {
+	t.Parallel()
+
+	var streamTimestamps timestampUnwrapper
+
+	got := audioTimestampForPacket(baichuan.MediaPacket{Kind: baichuan.MediaPacketAAC}, &streamTimestamps, 138189977, true)
+	want := mediaTimestamp{Microseconds: 138189977, Valid: true}
+	if got != want {
+		t.Fatalf("audioTimestampForPacket() = %+v, want %+v", got, want)
+	}
+	if got.Authoritative {
+		t.Fatal("video-derived timestamp must not re-anchor every frame")
+	}
+}
+
+// Both tracks must land on the same media time, otherwise a consumer has no
+// way to line them up. Timestamp taken from a real capture of an E321.
+func TestAudioAndVideoRTPDescribeTheSameMediaTime(t *testing.T) {
+	t.Parallel()
+
+	const videoUS = 138189977
+
+	videoRTP := rtpTimestampForClock(videoUS, 90000)
+	audioTS := audioTimestampForPacket(baichuan.MediaPacket{Kind: baichuan.MediaPacketAAC}, &timestampUnwrapper{}, videoUS, true)
+	audioRTP, ok := rtpTimestampForMediaTime(audioTS, 16000)
+	if !ok {
+		t.Fatal("audio timestamp not resolved")
+	}
+
+	videoSeconds := float64(videoRTP) / 90000
+	audioSeconds := float64(audioRTP) / 16000
+	if diff := videoSeconds - audioSeconds; diff > 0.001 || diff < -0.001 {
+		t.Fatalf("tracks drift apart: video %.6fs vs audio %.6fs", videoSeconds, audioSeconds)
 	}
 }
 
@@ -195,7 +231,8 @@ func TestAudioTimestampForPacketUsesAuthoritativePacketTimestamp(t *testing.T) {
 		HasTimestamp:       true,
 	}
 
-	got := audioTimestampForPacket(packet, &streamTimestamps)
+	// a packet with its own timestamp wins over the video anchor
+	got := audioTimestampForPacket(packet, &streamTimestamps, 999999, true)
 	want := mediaTimestamp{
 		Microseconds:  1234,
 		Valid:         true,

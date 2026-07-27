@@ -30,22 +30,18 @@ type serverFlags struct {
 	PprofAddress            string
 	LogLevel                string
 	LogPackets              bool
-	AudioPacerInitialLatMs  int
-	AudioPacerMaxLeadMs     int
-	VideoPacerInitialLatMs  int
-	VideoPacerMaxLeadMs     int
+	PacerInitialLatMs       int
+	PacerMaxLeadMs          int
 	EnableRTCPSenderReports bool
 }
 
 var flags = serverFlags{
-	RTSPAddress:            ":8554",
-	RTPAddress:             ":8000",
-	RTCPAddress:            ":8001",
-	LogLevel:               "info",
-	AudioPacerInitialLatMs: 500,
-	AudioPacerMaxLeadMs:    2000,
-	VideoPacerInitialLatMs: 1500,
-	VideoPacerMaxLeadMs:    3000,
+	RTSPAddress:       ":8554",
+	RTPAddress:        ":8000",
+	RTCPAddress:       ":8001",
+	LogLevel:          "info",
+	PacerInitialLatMs: 1500,
+	PacerMaxLeadMs:    3000,
 }
 
 func envVars(names ...string) cli.ValueSourceChain {
@@ -109,32 +105,18 @@ func main() {
 				Destination: &flags.LogPackets,
 			},
 			&cli.IntFlag{
-				Name:        "server-audio-pacer-initial-latency-ms",
-				Usage:       "RTSP audio pacer startup delay in ms (smooths bursts; default 500)",
-				Sources:     envVars("SERVER_AUDIO_PACER_INITIAL_LATENCY_MS"),
-				Value:       flags.AudioPacerInitialLatMs,
-				Destination: &flags.AudioPacerInitialLatMs,
+				Name:        "server-pacer-initial-latency-ms",
+				Usage:       "RTSP pacer startup delay in ms (smooths bursts; default 1500)",
+				Sources:     envVars("SERVER_PACER_INITIAL_LATENCY_MS"),
+				Value:       flags.PacerInitialLatMs,
+				Destination: &flags.PacerInitialLatMs,
 			},
 			&cli.IntFlag{
-				Name:        "server-audio-pacer-max-lead-ms",
-				Usage:       "max audio pacer cursor lead over wall clock in ms before snapping (default 2000)",
-				Sources:     envVars("SERVER_AUDIO_PACER_MAX_LEAD_MS"),
-				Value:       flags.AudioPacerMaxLeadMs,
-				Destination: &flags.AudioPacerMaxLeadMs,
-			},
-			&cli.IntFlag{
-				Name:        "server-video-pacer-initial-latency-ms",
-				Usage:       "RTSP video pacer startup delay in ms (default 1500)",
-				Sources:     envVars("SERVER_VIDEO_PACER_INITIAL_LATENCY_MS"),
-				Value:       flags.VideoPacerInitialLatMs,
-				Destination: &flags.VideoPacerInitialLatMs,
-			},
-			&cli.IntFlag{
-				Name:        "server-video-pacer-max-lead-ms",
-				Usage:       "max video pacer cursor lead over wall clock in ms before snapping (default 3000)",
-				Sources:     envVars("SERVER_VIDEO_PACER_MAX_LEAD_MS"),
-				Value:       flags.VideoPacerMaxLeadMs,
-				Destination: &flags.VideoPacerMaxLeadMs,
+				Name:        "server-pacer-max-lead-ms",
+				Usage:       "max pacer cursor distance from wall clock in ms before re-anchoring (default 3000)",
+				Sources:     envVars("SERVER_PACER_MAX_LEAD_MS"),
+				Value:       flags.PacerMaxLeadMs,
+				Destination: &flags.PacerMaxLeadMs,
 			},
 			&cli.BoolFlag{
 				Name:        "server-enable-rtcp-sender-reports",
@@ -183,16 +165,14 @@ func runApp(ctx context.Context, log *appLogger, cameras []bridge.CameraConfig) 
 	}
 
 	b := bridge.New(bridge.Options{
-		RTSPAddress:              flags.RTSPAddress,
-		RTPAddress:               flags.RTPAddress,
-		RTCPAddress:              flags.RTCPAddress,
-		EnableRTCPSenderReports:  flags.EnableRTCPSenderReports,
-		LogPackets:               flags.LogPackets,
-		Logger:                   log,
-		AudioPacerInitialLatency: time.Duration(flags.AudioPacerInitialLatMs) * time.Millisecond,
-		AudioPacerMaxLead:        time.Duration(flags.AudioPacerMaxLeadMs) * time.Millisecond,
-		VideoPacerInitialLatency: time.Duration(flags.VideoPacerInitialLatMs) * time.Millisecond,
-		VideoPacerMaxLead:        time.Duration(flags.VideoPacerMaxLeadMs) * time.Millisecond,
+		RTSPAddress:             flags.RTSPAddress,
+		RTPAddress:              flags.RTPAddress,
+		RTCPAddress:             flags.RTCPAddress,
+		EnableRTCPSenderReports: flags.EnableRTCPSenderReports,
+		LogPackets:              flags.LogPackets,
+		Logger:                  log,
+		PacerInitialLatency:     time.Duration(flags.PacerInitialLatMs) * time.Millisecond,
+		PacerMaxLead:            time.Duration(flags.PacerMaxLeadMs) * time.Millisecond,
 	})
 	if err := b.Start(); err != nil {
 		return err
