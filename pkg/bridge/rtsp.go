@@ -269,7 +269,7 @@ func (h *rtspServerHandler) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base
 
 	if talk := h.getTalk(ctx.Path); talk != nil && sessionHasBackChannel(ctx.Session) {
 		if err := talk.startBackChannel(ctx.Session, ctx.Path); err != nil {
-			h.log.Warnf("talk %s backchannel unavailable for path %s: %v", talk.cameraName, ctx.Path, err)
+			talk.log.Warnf("talk backchannel unavailable for path %s: %v", ctx.Path, err)
 		}
 	}
 
@@ -307,7 +307,7 @@ func (h *rtspServerHandler) OnSessionClose(ctx *gortsplib.ServerHandlerOnSession
 		}
 		if state.talk != nil {
 			if state.talk.publisher != nil {
-				h.log.Debugf("talk %s rtsp session closed: %v", state.talk.publisher.cameraName, ctx.Error)
+				state.talk.publisher.log.Debugf("talk rtsp session closed: %v", ctx.Error)
 				state.talk.publisher.release(state.talk)
 			}
 			state.talk = nil

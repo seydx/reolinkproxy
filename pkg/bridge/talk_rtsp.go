@@ -237,7 +237,7 @@ func (p *rtspTalkPublisher) bindInputs(session *gortsplib.ServerSession, inputs 
 		session.OnPacketRTP(current.media, inputFormat, func(pkt *rtp.Packet) {
 			pcm, err := current.decode(pkt)
 			if err != nil {
-				p.log.Warnf("talk %s decode error: %v", p.cameraName, err)
+				p.log.Warnf("talk decode error: %v", err)
 				return
 			}
 			if len(pcm) == 0 {
@@ -305,10 +305,10 @@ func (p *rtspTalkPublisher) record(ctx *gortsplib.ServerHandlerOnRecordCtx) (*ba
 }
 
 func (p *rtspTalkPublisher) startBackChannel(session *gortsplib.ServerSession, path string) error {
-	p.log.Debugf("talk %s starting backchannel for path %s", p.cameraName, path)
+	p.log.Debugf("talk starting backchannel for path %s", path)
 	inputs, err := selectBackChannelInputs(session.Medias())
 	if err != nil {
-		p.log.Warnf("talk %s failed to select backchannel inputs: %v", p.cameraName, err)
+		p.log.Warnf("talk failed to select backchannel inputs: %v", err)
 		return err
 	}
 	return p.startBridge(session, path, inputs)

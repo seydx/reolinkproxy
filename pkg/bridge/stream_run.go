@@ -95,9 +95,9 @@ func (b *Bridge) runStream(
 		nextPaused, nextReason := pauseCfg.shouldPause(now, handler)
 		if nextPaused != paused || nextReason != pauseReason {
 			if nextPaused {
-				log.Infof("stream %s paused: %s", meta.name, nextReason)
+				log.Debugf("stream %s paused: %s", meta.name, nextReason)
 			} else if paused {
-				log.Infof("stream %s resumed", meta.name)
+				log.Debugf("stream %s resumed", meta.name)
 			}
 			paused = nextPaused
 			pauseReason = nextReason
@@ -122,13 +122,13 @@ func (b *Bridge) runStream(
 				meta.setVideoInfo(packet.Width, packet.Height, packet.FPS, "")
 				if packet.Width != lastWidth || packet.Height != lastHeight {
 					lastWidth, lastHeight = packet.Width, packet.Height
-					log.Infof("stream %s info size=%dx%d fps=%d", meta.name, packet.Width, packet.Height, packet.FPS)
+					log.Debugf("stream %s info size=%dx%d fps=%d", meta.name, packet.Width, packet.Height, packet.FPS)
 				}
 
 			case baichuan.MediaPacketIFrame, baichuan.MediaPacketPFrame:
 				if packet.Codec != "H265" && packet.Codec != "H264" {
 					if !firstVideo {
-						log.Infof("stream %s skipping unsupported codec %q", meta.name, packet.Codec)
+						log.Warnf("stream %s skipping unsupported codec %q", meta.name, packet.Codec)
 					}
 					continue
 				}
@@ -145,7 +145,7 @@ func (b *Bridge) runStream(
 					continue
 				}
 				if !packet.HasTimestamp {
-					log.Infof("stream %s skipping video packet without timestamp", meta.name)
+					log.Debugf("stream %s skipping video packet without timestamp", meta.name)
 					continue
 				}
 				continuousUS := streamTimestamps.unwrap(packet.TimestampMicrosecs)
@@ -159,7 +159,7 @@ func (b *Bridge) runStream(
 						videoFormat = h265Format
 						enc, err := h265Format.CreateEncoder()
 						if err != nil {
-							log.Infof("stream %s create h265 encoder: %v", meta.name, err)
+							log.Warnf("stream %s create h265 encoder: %v", meta.name, err)
 							videoFormat = nil
 							continue
 						}
@@ -169,7 +169,7 @@ func (b *Bridge) runStream(
 						videoFormat = h264Format
 						enc, err := h264Format.CreateEncoder()
 						if err != nil {
-							log.Infof("stream %s create h264 encoder: %v", meta.name, err)
+							log.Warnf("stream %s create h264 encoder: %v", meta.name, err)
 							videoFormat = nil
 							continue
 						}
@@ -206,7 +206,7 @@ func (b *Bridge) runStream(
 				if !handler.ready() {
 					if !readyToExpose {
 						if packet.Kind == baichuan.MediaPacketIFrame && logPackets {
-							log.Infof("stream %s waiting for parameter sets before exposing RTSP path", meta.name)
+							log.Debugf("stream %s waiting for parameter sets before exposing RTSP path", meta.name)
 						}
 						continue
 					}
@@ -218,7 +218,7 @@ func (b *Bridge) runStream(
 					}
 
 					if err := handler.setReady(videoMedia, audio.mediaDescription()); err != nil {
-						log.Infof("stream %s prepare rtsp stream: %v", meta.name, err)
+						log.Warnf("stream %s prepare rtsp stream: %v", meta.name, err)
 						continue
 					}
 					device.setAudioKnown(stream, audio.ready())
@@ -239,7 +239,7 @@ func (b *Bridge) runStream(
 				}
 
 				if err != nil {
-					log.Infof("stream %s encode rtp: %v", meta.name, err)
+					log.Warnf("stream %s encode rtp: %v", meta.name, err)
 					continue
 				}
 

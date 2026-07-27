@@ -194,7 +194,7 @@ func (b *Bridge) AddCamera(cfg CameraConfig) (*Camera, error) {
 		uint8(cfg.Channel), //#nosec G115
 		device,
 		cfg.TalkVolume,
-		b.log,
+		camLog,
 	)
 	b.handler.addTalk(talkPath, talkPublisher)
 
@@ -340,7 +340,7 @@ func (b *Bridge) setupCameraStreams(
 			preferredTwoWayHandler = twoWayHandler
 		}
 
-		b.log.Infof("stream registered camera=%s stream=%s path=%s", cfg.Name, s, path)
+		b.log.Debugf("stream registered camera=%s stream=%s path=%s", cfg.Name, s, path)
 		b.log.Debugf("two-way stream registered camera=%s stream=%s path=%s", cfg.Name, s, twoWayPath)
 
 		var wantStream func() bool

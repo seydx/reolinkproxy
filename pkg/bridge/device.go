@@ -270,7 +270,7 @@ func (m *cameraDevice) pumpPreview(
 			return false
 		case <-idleTicker.C:
 			if wantStream != nil && !wantStream() {
-				m.log.Infof("stream %s channel %d idle, stopping preview", m.cameraName, channel)
+				m.log.Debugf("stream %s channel %d idle, stopping preview", m.cameraName, channel)
 				if err := client.StopPreview(ctx, channel, stream); err != nil {
 					m.ResetIfCurrent(client, fmt.Sprintf("idle preview stop failed: %v", err))
 				}
