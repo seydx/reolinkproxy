@@ -331,7 +331,7 @@ func (p *talkbackPipeline) runBridgeInternal(
 	pcmSamples := 0
 	blocksWritten := 0
 	defer func() {
-		p.log.Debugf("talk %s internal bridge stopped path=%s duration=%v pcm_packets=%d pcm_samples=%d blocks=%d", p.cameraName, path, time.Since(startedAt).Round(time.Millisecond), pcmPackets, pcmSamples, blocksWritten)
+		p.log.Debugf("talk %s internal bridge stopped path=%s duration=%v pcm_packets=%d pcm_samples=%d blocks=%d queued=%d", p.cameraName, path, time.Since(startedAt).Round(time.Millisecond), pcmPackets, pcmSamples, blocksWritten, len(pcmCh))
 	}()
 
 	idleTimer := time.NewTimer(5 * time.Second)
@@ -367,6 +367,24 @@ func (p *talkbackPipeline) runBridgeInternal(
 			pcmBuffer = pcmBuffer[blockSamples:]
 		}
 		return nil
+	}
+
+	// Opening the talk session takes a moment, and the audio that piled up
+	// meanwhile would be pushed as one burst the camera then plays back late
+	// for the rest of the session. Keep the newest, drop the rest.
+	dropped := 0
+	for {
+		select {
+		case pcm := <-pcmCh:
+			dropped++
+			firstPcm = pcm
+			continue
+		default:
+		}
+		break
+	}
+	if dropped > 0 {
+		p.log.Debugf("talk %s dropped %d packets buffered while the session opened", p.cameraName, dropped)
 	}
 
 	if err := processPCM(firstPcm); err != nil {

@@ -41,7 +41,11 @@ type rtspTalkSessionState struct {
 	refs      int // sessions feeding this bridge, guarded by publisher.mu
 }
 
-const rtspTalkPCMQueueSize = 256
+// Live speech is worth less the later it arrives, so the queue holds only a
+// few packets and drops the oldest beyond that. A deep queue turns every
+// hiccup into permanent delay, because input and output run at the same rate
+// and the backlog never drains.
+const rtspTalkPCMQueueSize = 8
 
 func newDedicatedTalkMedia() *description.Media {
 	return &description.Media{
