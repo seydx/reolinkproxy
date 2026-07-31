@@ -50,6 +50,25 @@ type CameraConfig struct {
 	// BatteryCamera uses a much longer reconnect backoff (30s instead of 2s)
 	// so a sleeping battery camera is not woken over and over.
 	BatteryCamera bool
+	// AudioHints carries what a previous run learned about each profile's
+	// audio, keyed by profile name. A stream whose audio is known starts with
+	// the track already declared instead of waiting for the first packet; a
+	// stream known to be silent is exposed without waiting at all. Both are
+	// hints: the stream corrects them when reality differs.
+	AudioHints map[string]AudioHint
+}
+
+// AudioHint describes a profile's audio as last observed. Present with an
+// empty Codec means the profile carries no audio.
+type AudioHint struct {
+	Codec      string // "aac", "pcma", or empty for none
+	SampleRate int
+	Channels   int
+}
+
+// known reports whether the hint carries a usable audio configuration.
+func (h AudioHint) known() bool {
+	return h.Codec != "" && h.SampleRate > 0 && h.Channels > 0
 }
 
 // ApplyDefaults fills unset fields with their documented defaults.

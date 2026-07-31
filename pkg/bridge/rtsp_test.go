@@ -324,3 +324,40 @@ func TestResetLetsTheSessionBeRebuiltWithAudio(t *testing.T) {
 		t.Fatalf("rebuilt session has %d medias, want video and audio", got)
 	}
 }
+
+// A profile whose audio was seen once starts with the track declared, so the
+// session never has to wait for the first packet or rebuild for it.
+func TestDeclareAACBuildsTheTrackFromAHint(t *testing.T) {
+	t.Parallel()
+
+	publisher := &audioPublisher{log: NopLogger{}}
+	if publisher.ready() {
+		t.Fatal("publisher ready before anything was declared")
+	}
+
+	if err := publisher.declareAAC(16000, 1); err != nil {
+		t.Fatalf("declareAAC() error = %v", err)
+	}
+	if !publisher.ready() {
+		t.Fatal("declared publisher is not ready")
+	}
+	if got := publisher.hint(); got != (AudioHint{Codec: "aac", SampleRate: 16000, Channels: 1}) {
+		t.Fatalf("hint() = %+v", got)
+	}
+
+	// the camera switching format must invalidate the declaration
+	if !publisher.mismatchesDeclared(8000, 1) {
+		t.Fatal("a different sample rate must count as a mismatch")
+	}
+	if publisher.mismatchesDeclared(16000, 1) {
+		t.Fatal("the declared format must not count as a mismatch")
+	}
+
+	publisher.dropDeclaration()
+	if publisher.ready() {
+		t.Fatal("publisher still ready after the declaration was dropped")
+	}
+	if got := publisher.hint(); got != (AudioHint{}) {
+		t.Fatalf("dropped publisher reports %+v, want silence", got)
+	}
+}

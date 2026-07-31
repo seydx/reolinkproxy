@@ -25,6 +25,10 @@ const (
 	// audioSilentWindow exposes a stream that had no audio last time quickly,
 	// while still leaving room for audio that was switched on since.
 	audioSilentWindow = 2 * time.Second
+	// audioConfirmWindow bounds how long a track declared from a previous run
+	// may stay empty before it is dropped again, e.g. after the microphone was
+	// switched off in the camera app.
+	audioConfirmWindow = 20 * time.Second
 )
 
 //nolint:gocyclo
@@ -37,6 +41,8 @@ func (b *Bridge) runStream(
 	meta *streamMetadata,
 	pauseCfg streamPauseConfig,
 	wantStream func() bool,
+	hint *AudioHint,
+	onHint func(AudioHint),
 ) {
 	// per-camera logger, so stream and pacer messages name the camera they belong to
 	log := device.log
@@ -69,6 +75,7 @@ func (b *Bridge) runStream(
 		audioWindow = audioSilentWindow
 	}
 	var startupDeadline time.Time
+	var confirmDeadline time.Time
 
 	pacer := &mediaPacer{
 		ch:      make(chan pacedFrame, 600),
@@ -84,6 +91,24 @@ func (b *Bridge) runStream(
 		device.setAudioKnown(stream, true)
 		rebuildForAudio = true
 	}}
+
+	// what the last run saw decides how this one starts: a known track is
+	// declared upfront so audio flows from the first second, a profile known to
+	// be silent is exposed without waiting for audio that never comes
+	declared := false
+	switch {
+	case hint == nil:
+	case hint.known() && hint.Codec == "aac":
+		if err := audio.declareAAC(hint.SampleRate, hint.Channels); err != nil {
+			log.Warnf("stream %s could not reuse the known audio format: %v", meta.name, err)
+		} else {
+			declared = true
+			meta.setAudioAAC(hint.SampleRate, hint.Channels)
+			log.Debugf("stream %s starting with the known AAC track (%d Hz, %d ch)", meta.name, hint.SampleRate, hint.Channels)
+		}
+	case hint.Codec == "":
+		audioWindow = 0
+	}
 
 	emitVideo := func(pkts []*rtp.Packet, continuousUS uint64) {
 		if len(pkts) == 0 {
@@ -226,6 +251,27 @@ func (b *Bridge) runStream(
 						continue
 					}
 					device.setAudioKnown(stream, audio.ready())
+					if declared && confirmDeadline.IsZero() {
+						confirmDeadline = time.Now().Add(audioConfirmWindow)
+					}
+					reportAudioHint(onHint, audio)
+				} else if declared && !audio.published && !confirmDeadline.IsZero() && time.Now().After(confirmDeadline) {
+					// the track carried over from the last run never got a
+					// packet, e.g. the microphone was switched off since
+					if packet.Kind != baichuan.MediaPacketIFrame {
+						continue
+					}
+					declared = false
+					confirmDeadline = time.Time{}
+					log.Infof("stream %s dropping the carried-over audio track, the camera sends none", meta.name)
+					audio.dropDeclaration()
+					if onHint != nil {
+						onHint(AudioHint{})
+					}
+					handler.reset()
+					continue
+				} else if declared && audio.published && !confirmDeadline.IsZero() {
+					confirmDeadline = time.Time{}
 				} else if rebuildForAudio {
 					// wait for a keyframe so the rebuilt session starts decodable
 					if packet.Kind != baichuan.MediaPacketIFrame {
@@ -387,6 +433,15 @@ func rtpTimestampAfter(ts uint32, prev uint32) bool {
 
 func rtpTimestampBefore(ts uint32, prev uint32) bool {
 	return int32(ts-prev) < 0 //#nosec G115
+}
+
+// reportAudioHint hands the observed audio configuration to the caller so it
+// can be reused on the next start. An unconfigured publisher reports silence.
+func reportAudioHint(onHint func(AudioHint), audio *audioPublisher) {
+	if onHint == nil {
+		return
+	}
+	onHint(audio.hint())
 }
 
 // audioTimestampForPacket resolves the media time of an audio packet. AAC

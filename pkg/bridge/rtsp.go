@@ -508,9 +508,73 @@ type audioPublisher struct {
 	nextTimestamp  uint32
 	nextMediaUS    uint64
 	anchored       bool
+	declaredRate   int
+	declaredChans  int
+	published      bool
 	timestampGuard rtpTimestampGuard
 	unsupported    bool
 	rebuildAsked   bool
+}
+
+// declareAAC builds the audio media from what a previous run observed, so the
+// session can start with the track in place instead of waiting for the first
+// packet. The stream corrects itself if the camera turns out to send something
+// else, or nothing at all.
+func (p *audioPublisher) declareAAC(sampleRate int, channels int) error {
+	cfg := &mpeg4audio.AudioSpecificConfig{
+		Type:         mpeg4audio.ObjectTypeAACLC,
+		SampleRate:   sampleRate,
+		ChannelCount: channels,
+	}
+	audioFormat := &format.MPEG4Audio{
+		PayloadTyp:       97,
+		Config:           cfg,
+		SizeLength:       13,
+		IndexLength:      3,
+		IndexDeltaLength: 3,
+	}
+	encoder, err := audioFormat.CreateEncoder()
+	if err != nil {
+		return fmt.Errorf("create AAC RTP encoder: %w", err)
+	}
+
+	p.media = &description.Media{
+		Type:    description.MediaTypeAudio,
+		Control: "trackID=1",
+		Formats: []format.Format{audioFormat},
+	}
+	p.aacEncoder = encoder
+	p.declaredRate = sampleRate
+	p.declaredChans = channels
+	return nil
+}
+
+// mismatchesDeclared reports whether the arriving audio differs from what was
+// declared upfront. The SDP would then describe something the packets are not.
+func (p *audioPublisher) mismatchesDeclared(sampleRate int, channels int) bool {
+	return p.declaredRate != 0 && (p.declaredRate != sampleRate || p.declaredChans != channels)
+}
+
+// dropDeclaration clears a wrong or unconfirmed declaration so the next
+// configure rebuilds the track from what the camera actually sends.
+func (p *audioPublisher) dropDeclaration() {
+	p.media = nil
+	p.aacEncoder = nil
+	p.g711Encoder = nil
+	p.declaredRate = 0
+	p.declaredChans = 0
+}
+
+// hint describes the publisher's current audio for the next run. A publisher
+// without audio reports the zero hint, which means "this profile is silent".
+func (p *audioPublisher) hint() AudioHint {
+	if !p.ready() {
+		return AudioHint{}
+	}
+	if p.aacEncoder != nil {
+		return AudioHint{Codec: "aac", SampleRate: p.declaredRate, Channels: p.declaredChans}
+	}
+	return AudioHint{Codec: "pcma", SampleRate: p.declaredRate, Channels: p.declaredChans}
 }
 
 // requestRebuildIfLate reports audio that showed up after the session was
@@ -563,6 +627,12 @@ func (p *audioPublisher) processAAC(data []byte, timestamp mediaTimestamp, handl
 
 	expectedTS, hasExpectedTS := rtpTimestampForMediaTime(timestamp, cfg.SampleRate)
 
+	if p.mismatchesDeclared(cfg.SampleRate, int(cfg.ChannelConfig)) {
+		p.log.Infof("audio is %d Hz/%d ch, not the %d Hz/%d ch carried over from the last run",
+			cfg.SampleRate, cfg.ChannelConfig, p.declaredRate, p.declaredChans)
+		p.dropDeclaration()
+	}
+
 	if !p.ready() {
 		audioFormat := &format.MPEG4Audio{
 			PayloadTyp:       97,
@@ -582,6 +652,8 @@ func (p *audioPublisher) processAAC(data []byte, timestamp mediaTimestamp, handl
 			Formats: []format.Format{audioFormat},
 		}
 		p.aacEncoder = encoder
+		p.declaredRate = cfg.SampleRate
+		p.declaredChans = int(cfg.ChannelConfig)
 		p.nextTimestamp = 0
 		if hasExpectedTS {
 			p.nextTimestamp = expectedTS
@@ -615,6 +687,7 @@ func (p *audioPublisher) processAAC(data []byte, timestamp mediaTimestamp, handl
 	for _, pkt := range pkts {
 		pkt.Timestamp += baseTimestamp
 	}
+	p.published = true
 	samples := len(aus) * mpeg4audio.SamplesPerAccessUnit
 	p.audioPacer.enqueue(pacedFrame{pkts: pkts, media: p.media, mediaUS: p.nextMediaUS})
 
@@ -654,6 +727,8 @@ func (p *audioPublisher) processADPCM(data []byte, timestamp mediaTimestamp, han
 			Formats: []format.Format{audioFormat},
 		}
 		p.g711Encoder = encoder
+		p.declaredRate = sampleRate
+		p.declaredChans = channelCount
 		p.nextTimestamp = 0
 		if hasExpectedTS {
 			p.nextTimestamp = expectedTS
@@ -687,6 +762,7 @@ func (p *audioPublisher) processADPCM(data []byte, timestamp mediaTimestamp, han
 	for _, pkt := range pkts {
 		pkt.Timestamp += baseTimestamp
 	}
+	p.published = true
 	p.audioPacer.enqueue(pacedFrame{pkts: pkts, media: p.media, mediaUS: p.nextMediaUS})
 
 	p.nextTimestamp = baseTimestamp + duration

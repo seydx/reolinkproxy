@@ -40,11 +40,13 @@ type cameraEvents struct {
 	onConnection func(connected bool)
 	onSleep      func(sleeping bool)
 	onFloodlight func(on bool)
+	onAudioHint  func(profile string, hint AudioHint)
 
 	lastVisitor    bool
 	lastMotion     *MotionEvent
 	lastSleep      *bool
 	lastFloodlight *bool
+	lastAudioHint  map[string]AudioHint
 	lastConnection *bool
 }
 
@@ -89,6 +91,33 @@ func (c *Camera) OnSleep(fn func(sleeping bool)) {
 	c.events.mu.Lock()
 	defer c.events.mu.Unlock()
 	c.events.onSleep = fn
+}
+
+// OnAudioHint registers the handler invoked when a stream establishes what
+// audio it carries. Persisting it lets the next start declare the track right
+// away instead of waiting for the first packet.
+func (c *Camera) OnAudioHint(fn func(profile string, hint AudioHint)) {
+	c.events.mu.Lock()
+	defer c.events.mu.Unlock()
+	c.events.onAudioHint = fn
+}
+
+func (c *Camera) reportAudioHint(profile string, hint AudioHint) {
+	c.events.mu.Lock()
+	last, seen := c.events.lastAudioHint[profile]
+	changed := !seen || last != hint
+	if changed {
+		if c.events.lastAudioHint == nil {
+			c.events.lastAudioHint = make(map[string]AudioHint)
+		}
+		c.events.lastAudioHint[profile] = hint
+	}
+	onAudioHint := c.events.onAudioHint
+	c.events.mu.Unlock()
+
+	if changed && onAudioHint != nil {
+		onAudioHint(profile, hint)
+	}
 }
 
 // OnFloodlight registers the handler invoked when the camera reports its

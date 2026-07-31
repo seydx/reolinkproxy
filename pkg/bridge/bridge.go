@@ -240,7 +240,7 @@ func (b *Bridge) AddCamera(cfg CameraConfig) (*Camera, error) {
 		webhookURL:  webhookURL,
 	})
 
-	metas, streamPaths := b.setupCameraStreams(ctx, cfg, device, talkPublisher, motionState)
+	metas, streamPaths := b.setupCameraStreams(ctx, cam, cfg, device, talkPublisher, motionState)
 	cam.streams = metas
 	cam.paths = make([]string, 0, 1+len(streamPaths))
 	cam.paths = append(cam.paths, talkPath)
@@ -282,6 +282,7 @@ func (b *Bridge) Camera(name string) (*Camera, bool) {
 // registered path for later cleanup.
 func (b *Bridge) setupCameraStreams(
 	ctx context.Context,
+	cam *Camera,
 	cfg CameraConfig,
 	device *cameraDevice,
 	talkPublisher *rtspTalkPublisher,
@@ -349,6 +350,12 @@ func (b *Bridge) setupCameraStreams(
 			wantStream = idleGate(streamHandler, cfg.IdleTimeout)
 		}
 
+		var hint *AudioHint
+		if h, ok := cfg.AudioHints[s]; ok {
+			hint = &h
+		}
+		profile := s
+
 		go b.runStream(
 			ctx,
 			device,
@@ -358,6 +365,8 @@ func (b *Bridge) setupCameraStreams(
 			meta,
 			cfg.streamPauseConfig(motionState),
 			wantStream,
+			hint,
+			func(observed AudioHint) { cam.reportAudioHint(profile, observed) },
 		)
 	}
 
