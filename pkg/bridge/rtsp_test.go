@@ -5,6 +5,9 @@ import (
 	"encoding/binary"
 	"testing"
 
+	gortsplib "github.com/bluenviron/gortsplib/v5"
+	"github.com/bluenviron/gortsplib/v5/pkg/description"
+	"github.com/bluenviron/gortsplib/v5/pkg/format"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4audio"
 	"github.com/pion/rtp"
 
@@ -266,5 +269,58 @@ func TestCoalesceRejectsTruncatedNALUs(t *testing.T) {
 	valid := []byte{0x67, 0x42, 0x00, 0x20}
 	if got := coalesce(valid, fallback); !bytes.Equal(got, valid) {
 		t.Errorf("coalesce(valid) = %x, want %x", got, valid)
+	}
+}
+
+// A stream whose audio starts late used to stay mute for its whole life, and
+// with hot mode that life is hours. Resetting lets the next setReady rebuild
+// the session with the audio track.
+func TestResetLetsTheSessionBeRebuiltWithAudio(t *testing.T) {
+	t.Parallel()
+
+	server := &gortsplib.Server{RTSPAddress: "127.0.0.1:0"}
+	if err := server.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer server.Close()
+
+	handler := newRTSPStreamHandler("cam/stream")
+	handler.attachServer(server)
+
+	video := &description.Media{
+		Type:    description.MediaTypeVideo,
+		Control: "trackID=0",
+		Formats: []format.Format{&format.H264{PayloadTyp: 96, PacketizationMode: 1}},
+	}
+	audio := &description.Media{
+		Type:    description.MediaTypeAudio,
+		Control: "trackID=1",
+		Formats: []format.Format{&format.G711{PayloadTyp: 8, SampleRate: 8000, ChannelCount: 1}},
+	}
+
+	if err := handler.setReady(video); err != nil {
+		t.Fatalf("setReady() error = %v", err)
+	}
+	if got := len(handler.stream.Desc.Medias); got != 1 {
+		t.Fatalf("video-only session has %d medias, want 1", got)
+	}
+
+	// setReady alone keeps the existing session, that is what made late audio permanent
+	if err := handler.setReady(video, audio); err != nil {
+		t.Fatalf("setReady() error = %v", err)
+	}
+	if got := len(handler.stream.Desc.Medias); got != 1 {
+		t.Fatalf("session changed without a reset: %d medias", got)
+	}
+
+	handler.reset()
+	if handler.ready() {
+		t.Fatal("handler still ready after reset")
+	}
+	if err := handler.setReady(video, audio); err != nil {
+		t.Fatalf("setReady() after reset error = %v", err)
+	}
+	if got := len(handler.stream.Desc.Medias); got != 2 {
+		t.Fatalf("rebuilt session has %d medias, want video and audio", got)
 	}
 }

@@ -79,7 +79,11 @@ func (b *Bridge) runStream(
 	go pacer.run(ctx)
 
 	// audio that misses the window still teaches the next session to be patient
-	audio := &audioPublisher{audioPacer: pacer, log: log, onLateAudio: func() { device.setAudioKnown(stream, true) }}
+	rebuildForAudio := false
+	audio := &audioPublisher{audioPacer: pacer, log: log, onLateAudio: func() {
+		device.setAudioKnown(stream, true)
+		rebuildForAudio = true
+	}}
 
 	emitVideo := func(pkts []*rtp.Packet, continuousUS uint64) {
 		if len(pkts) == 0 {
@@ -222,6 +226,15 @@ func (b *Bridge) runStream(
 						continue
 					}
 					device.setAudioKnown(stream, audio.ready())
+				} else if rebuildForAudio {
+					// wait for a keyframe so the rebuilt session starts decodable
+					if packet.Kind != baichuan.MediaPacketIFrame {
+						continue
+					}
+					rebuildForAudio = false
+					log.Infof("stream %s restarting session to carry the late audio track", meta.name)
+					handler.reset()
+					continue
 				}
 
 				streamPaused := updatePauseState(time.Now())

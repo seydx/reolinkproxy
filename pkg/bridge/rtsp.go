@@ -467,6 +467,23 @@ func (h *rtspStreamHandler) setReady(medias ...*description.Media) error {
 	return nil
 }
 
+// reset drops the current session so the next setReady rebuilds it with a
+// different media set. Readers are disconnected and reconnect on their own.
+func (h *rtspStreamHandler) reset() {
+	h.mu.Lock()
+	stream := h.stream
+	h.stream = nil
+	mirrors := append([]*rtspStreamHandler(nil), h.mirrors...)
+	h.mu.Unlock()
+
+	if stream != nil {
+		stream.Close()
+	}
+	for _, mirror := range mirrors {
+		mirror.reset()
+	}
+}
+
 func (h *rtspStreamHandler) writePacket(media *description.Media, pkt *rtp.Packet) {
 	h.mu.RLock()
 	stream := h.stream
@@ -493,7 +510,22 @@ type audioPublisher struct {
 	anchored       bool
 	timestampGuard rtpTimestampGuard
 	unsupported    bool
-	lateIgnored    bool
+	rebuildAsked   bool
+}
+
+// requestRebuildIfLate reports audio that showed up after the session was
+// already exposed video-only. The session is rebuilt once so the track is
+// carried for the rest of its life instead of being dropped; a stream whose
+// audio starts late otherwise stays mute for as long as it runs.
+func (p *audioPublisher) requestRebuildIfLate(handler *rtspStreamHandler) {
+	if !handler.ready() || p.rebuildAsked {
+		return
+	}
+	p.rebuildAsked = true
+	p.log.Infof("audio started late; rebuilding the RTSP session to carry it")
+	if p.onLateAudio != nil {
+		p.onLateAudio()
+	}
 }
 
 type mediaTimestamp struct {
@@ -532,17 +564,6 @@ func (p *audioPublisher) processAAC(data []byte, timestamp mediaTimestamp, handl
 	expectedTS, hasExpectedTS := rtpTimestampForMediaTime(timestamp, cfg.SampleRate)
 
 	if !p.ready() {
-		if handler.ready() {
-			if !p.lateIgnored {
-				p.lateIgnored = true
-				p.log.Warnf("audio arrived after RTSP session creation; keeping stream video-only")
-				if p.onLateAudio != nil {
-					p.onLateAudio()
-				}
-			}
-			return nil
-		}
-
 		audioFormat := &format.MPEG4Audio{
 			PayloadTyp:       97,
 			Config:           cfg,
@@ -568,6 +589,7 @@ func (p *audioPublisher) processAAC(data []byte, timestamp mediaTimestamp, handl
 		meta.setAudioAAC(cfg.SampleRate, int(cfg.ChannelConfig))
 
 		p.log.Debugf("audio configured codec=AAC sample_rate=%d channels=%d", cfg.SampleRate, cfg.ChannelConfig)
+		p.requestRebuildIfLate(handler)
 	}
 
 	if !handler.ready() {
@@ -615,17 +637,6 @@ func (p *audioPublisher) processADPCM(data []byte, timestamp mediaTimestamp, han
 	expectedTS, hasExpectedTS := rtpTimestampForMediaTime(timestamp, sampleRate)
 
 	if !p.ready() {
-		if handler.ready() {
-			if !p.lateIgnored {
-				p.lateIgnored = true
-				p.log.Warnf("audio arrived after RTSP session creation; keeping stream video-only")
-				if p.onLateAudio != nil {
-					p.onLateAudio()
-				}
-			}
-			return nil
-		}
-
 		audioFormat := &format.G711{
 			PayloadTyp:   8, // PCMA
 			MULaw:        false,
@@ -650,6 +661,7 @@ func (p *audioPublisher) processADPCM(data []byte, timestamp mediaTimestamp, han
 		meta.setAudioG711(sampleRate, channelCount)
 
 		p.log.Debugf("audio configured codec=PCMA sample_rate=%d channels=%d", sampleRate, channelCount)
+		p.requestRebuildIfLate(handler)
 	}
 
 	if !handler.ready() {
