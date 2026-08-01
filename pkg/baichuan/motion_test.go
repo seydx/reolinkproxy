@@ -199,3 +199,25 @@ func TestParseAbilityInfoFiltersByChannel(t *testing.T) {
 		t.Fatalf("abilities[version] = %v, want %v", got, want)
 	}
 }
+
+// Battery doorbells report a lingering person as a zone entry without an AI
+// type, and with the outer index left at zero. Skipping it dropped the event.
+func TestParseAlarmStateZoneWithoutAITypeCountsAsMotion(t *testing.T) {
+	t.Parallel()
+
+	xmlText := `<?xml version="1.0" encoding="utf-8"?><body><AlarmEventList><AlarmEvent><channelId>0</channelId><status>none</status><AItype>none</AItype><smartAiTypeList><smartAiType><type>linger</type><index>0</index><subList><index>1</index></subList></smartAiType></smartAiTypeList></AlarmEvent></AlarmEventList></body>`
+
+	state, matched, err := parseAlarmState(xmlText, 0, false)
+	if err != nil {
+		t.Fatalf("parseAlarmState() error = %v", err)
+	}
+	if !matched {
+		t.Fatal("event was not matched")
+	}
+	if !state.MotionDetected {
+		t.Fatal("a zone detection without an AI type must still report motion")
+	}
+	if !state.Active() {
+		t.Fatal("state is not active")
+	}
+}

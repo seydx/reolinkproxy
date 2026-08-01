@@ -162,7 +162,14 @@ func parseAlarmState(xmlText string, channel uint8, anyChannel bool) (AlarmState
 				state.MotionDetected = true
 			}
 			for _, sub := range smart.SubList {
-				for _, aiType := range parseAITypes(sub.Type) {
+				types := parseAITypes(sub.Type)
+				if len(types) == 0 {
+					// a zone entry without a type is still a detection in that
+					// zone; battery doorbells report linger that way
+					state.MotionDetected = true
+					continue
+				}
+				for _, aiType := range types {
 					if !slices.Contains(state.AITypes, aiType) {
 						state.AITypes = append(state.AITypes, aiType)
 					}
