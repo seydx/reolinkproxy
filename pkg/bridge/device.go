@@ -304,8 +304,9 @@ type eventHandlers struct {
 }
 
 // WatchEvents establishes a persistent event listener session (motion/AI
-// alarms + battery pushes), automatically reconnecting on failures and
-// re-subscribing every 5 minutes.
+// alarms + battery pushes) and reconnects when the connection drops. The
+// listeners live as long as the connection does; only the camera-side
+// subscription is renewed, so no push falls into a teardown gap.
 func (m *cameraDevice) WatchEvents(ctx context.Context, channel uint8, handlers eventHandlers) {
 	go func() {
 		motionUnsupported := false
@@ -357,43 +358,45 @@ func (m *cameraDevice) WatchEvents(ctx context.Context, channel uint8, handlers 
 				return
 			}
 
-			cancelAll := func() {
-				cancelAlarms()
-				cancelBattery()
-				cancelSleep()
-				cancelFloodlight()
-			}
+			m.runEventSession(ctx, client, channel, handlers, motionUnsupported)
 
-			m.waitForResubscribe(ctx, client, handlers, motionUnsupported)
-			cancelAll()
+			cancelAlarms()
+			cancelBattery()
+			cancelSleep()
+			cancelFloodlight()
 		}
 	}()
 }
 
-// waitForResubscribe blocks until the event session should be rebuilt. While
-// the camera has not pushed a single alarm, the subscription is re-sent every
-// alarmRefreshInterval: some firmwares acknowledge it and then stay silent, and
-// only a repeat makes them start pushing.
-func (m *cameraDevice) waitForResubscribe(ctx context.Context, client *baichuan.Client, handlers eventHandlers, motionUnsupported bool) {
+// runEventSession keeps the camera-side subscription alive until the
+// connection drops. A camera that has not pushed anything is asked again every
+// alarmRetryInterval, because some firmwares acknowledge the subscription and
+// then stay silent; once pushes flow, the slower renewal is enough.
+func (m *cameraDevice) runEventSession(ctx context.Context, client *baichuan.Client, channel uint8, handlers eventHandlers, motionUnsupported bool) {
 	const (
-		sessionLifetime      = 5 * time.Minute
-		alarmRefreshInterval = 30 * time.Second
+		alarmRetryInterval  = 30 * time.Second
+		alarmRenewInterval  = 5 * time.Minute
+		batteryPollInterval = 5 * time.Minute
 		// A working camera answers the subscription with its current state right
-		// away, so silence for this long means the events never started.
+		// away, so silence over this many retries means events never started.
 		alarmSilenceLimit = 4
 	)
 
-	rebuild := time.After(sessionLifetime)
-	silentRefreshes := 0
+	silentRetries := 0
 
 	// A battery camera must not be poked while it sleeps; its events come over
 	// the webhook anyway.
-	var refresh <-chan time.Time
+	var renew <-chan time.Time
 	if handlers.alarm != nil && !motionUnsupported && !handlers.pollBattery {
-		ticker := time.NewTicker(alarmRefreshInterval)
+		ticker := time.NewTicker(alarmRetryInterval)
 		defer ticker.Stop()
-		refresh = ticker.C
+		renew = ticker.C
 	}
+
+	battery := time.NewTicker(batteryPollInterval)
+	defer battery.Stop()
+
+	lastRenew := time.Now()
 
 	for {
 		select {
@@ -405,21 +408,26 @@ func (m *cameraDevice) waitForResubscribe(ctx context.Context, client *baichuan.
 				m.log.Warnf("events: listener disconnected for %s: %v. reconnecting...", m.cameraName, err)
 			}
 			return
-		case <-rebuild:
-			return
-		case <-refresh:
-			if client.AlarmPushSeen() {
+		case <-battery.C:
+			m.setupWebhookAndBatteryPoll(ctx, client, channel, handlers)
+		case now := <-renew:
+			pushing := client.AlarmPushSeen()
+			if pushing && now.Sub(lastRenew) < alarmRenewInterval {
 				continue
 			}
-			silentRefreshes++
-			if silentRefreshes == alarmSilenceLimit {
-				m.alarmSilenceOnce.Do(func() {
-					m.log.Warnf("events: camera %s accepted the event subscription but has not pushed anything, motion and AI detections stay idle", m.cameraName)
-				})
+			lastRenew = now
+
+			if !pushing {
+				silentRetries++
+				if silentRetries == alarmSilenceLimit {
+					m.alarmSilenceOnce.Do(func() {
+						m.log.Warnf("events: camera %s accepted the event subscription but has not pushed anything, motion and AI detections stay idle", m.cameraName)
+					})
+				}
+				m.log.Debugf("events: no alarm push from %s yet, re-sending the subscription", m.cameraName)
 			}
-			m.log.Debugf("events: no alarm push from %s yet, re-sending the subscription", m.cameraName)
 			if err := client.RefreshAlarmSubscription(ctx); err != nil {
-				m.log.Debugf("events: re-subscribe failed for %s: %v", m.cameraName, err)
+				m.log.Debugf("events: renewing the subscription failed for %s: %v", m.cameraName, err)
 			}
 		}
 	}
