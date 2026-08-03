@@ -7,6 +7,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -48,6 +49,17 @@ type Client struct {
 	wg        sync.WaitGroup
 
 	keepAliveOnce sync.Once
+
+	// alarmPushed latches once the camera has pushed an alarm event on this
+	// connection. Firmwares that accept the subscription without ever pushing
+	// need it re-sent, so the state has to be per connection.
+	alarmPushed atomic.Bool
+}
+
+func (c *Client) debugf(format string, args ...any) {
+	if c.cfg.Debugf != nil {
+		c.cfg.Debugf(format, args...)
+	}
 }
 
 type ioReadWriteCloser interface {

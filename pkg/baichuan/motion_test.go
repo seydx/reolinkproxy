@@ -221,3 +221,38 @@ func TestParseAlarmStateZoneWithoutAITypeCountsAsMotion(t *testing.T) {
 		t.Fatal("state is not active")
 	}
 }
+
+func TestPushListName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		xml  string
+		want string
+	}{
+		{
+			name: "day night event",
+			xml:  "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<body>\n<DayNightEventList version=\"1.1\">\n<DayNightEvent><channelId>0</channelId></DayNightEvent>\n</DayNightEventList>\n</body>",
+			want: "DayNightEventList",
+		},
+		{
+			name: "alarm event",
+			xml:  `<?xml version="1.0" encoding="utf-8"?><body><AlarmEventList><AlarmEvent><channelId>3</channelId></AlarmEvent></AlarmEventList></body>`,
+			want: "AlarmEventList",
+		},
+		{
+			name: "empty payload",
+			xml:  "",
+			want: "unknown",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := pushListName(test.xml); got != test.want {
+				t.Fatalf("pushListName() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}

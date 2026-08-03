@@ -82,7 +82,10 @@ const (
 // Header channel-ID semantics (reolink_aio): 250 = host, 1-100 = channel+1,
 // 0/251 = push. Standalone cameras tolerate host-level commands on channel 0,
 // but NVRs/HomeHubs reject them — the login then fails as "bad credentials".
-const channelIDHost uint8 = 250
+const (
+	channelIDHost uint8 = 250
+	channelIDPush uint8 = 251
+)
 
 func headerChannelID(channel uint8) uint8 {
 	return channel + 1
@@ -116,6 +119,9 @@ type Config struct {
 	Username string
 	Password string
 	Timeout  time.Duration
+	// Debugf, when set, receives protocol-level diagnostics. Callers route it
+	// to the camera's logger so the output stays attributable.
+	Debugf func(format string, args ...any)
 }
 
 func (c Config) normalized() Config {

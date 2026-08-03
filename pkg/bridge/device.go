@@ -26,6 +26,10 @@ type cameraDevice struct {
 	// subscription (unsupported firmware) so it is not retried on every reconnect.
 	webhookFailed bool
 
+	// alarmSilenceOnce keeps the "camera never pushes events" warning to a
+	// single line instead of one per session rebuild.
+	alarmSilenceOnce sync.Once
+
 	mu     sync.Mutex
 	client *baichuan.Client
 	// dualLens caches the last login's dual-lens flag so webhook pushes can
@@ -57,6 +61,9 @@ func (m *cameraDevice) setAudioKnown(stream baichuan.Stream, seen bool) {
 func newCameraDevice(cameraName string, cfg baichuan.Config, reconnectBackoff time.Duration, log Logger) *cameraDevice {
 	if reconnectBackoff <= 0 {
 		reconnectBackoff = 2 * time.Second
+	}
+	if log != nil {
+		cfg.Debugf = log.Debugf
 	}
 	return &cameraDevice{
 		cameraName:       cameraName,
@@ -357,21 +364,65 @@ func (m *cameraDevice) WatchEvents(ctx context.Context, channel uint8, handlers 
 				cancelFloodlight()
 			}
 
-			select {
-			case <-ctx.Done():
-				cancelAll()
-				return
-			case <-client.Done():
-				cancelAll()
-				if err := client.Err(); err != nil && ctx.Err() == nil {
-					m.ResetIfCurrent(client, fmt.Sprintf("event listener disconnected: %v", err))
-					m.log.Warnf("events: listener disconnected for %s: %v. reconnecting...", m.cameraName, err)
-				}
-			case <-time.After(5 * time.Minute):
-				cancelAll()
-			}
+			m.waitForResubscribe(ctx, client, handlers, motionUnsupported)
+			cancelAll()
 		}
 	}()
+}
+
+// waitForResubscribe blocks until the event session should be rebuilt. While
+// the camera has not pushed a single alarm, the subscription is re-sent every
+// alarmRefreshInterval: some firmwares acknowledge it and then stay silent, and
+// only a repeat makes them start pushing.
+func (m *cameraDevice) waitForResubscribe(ctx context.Context, client *baichuan.Client, handlers eventHandlers, motionUnsupported bool) {
+	const (
+		sessionLifetime      = 5 * time.Minute
+		alarmRefreshInterval = 30 * time.Second
+		// A working camera answers the subscription with its current state right
+		// away, so silence for this long means the events never started.
+		alarmSilenceLimit = 4
+	)
+
+	rebuild := time.After(sessionLifetime)
+	silentRefreshes := 0
+
+	// A battery camera must not be poked while it sleeps; its events come over
+	// the webhook anyway.
+	var refresh <-chan time.Time
+	if handlers.alarm != nil && !motionUnsupported && !handlers.pollBattery {
+		ticker := time.NewTicker(alarmRefreshInterval)
+		defer ticker.Stop()
+		refresh = ticker.C
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-client.Done():
+			if err := client.Err(); err != nil && ctx.Err() == nil {
+				m.ResetIfCurrent(client, fmt.Sprintf("event listener disconnected: %v", err))
+				m.log.Warnf("events: listener disconnected for %s: %v. reconnecting...", m.cameraName, err)
+			}
+			return
+		case <-rebuild:
+			return
+		case <-refresh:
+			if client.AlarmPushSeen() {
+				continue
+			}
+			silentRefreshes++
+			if silentRefreshes == alarmSilenceLimit {
+				m.alarmSilenceOnce.Do(func() {
+					m.log.Warnf("events: camera %s accepted the event subscription but has not pushed anything, motion and AI detections stay idle", m.cameraName)
+				})
+			}
+			m.log.Debugf("events: no alarm push from %s yet, re-sending the subscription", m.cameraName)
+			if err := client.RefreshAlarmSubscription(ctx); err != nil {
+				m.log.Debugf("events: re-subscribe failed for %s: %v", m.cameraName, err)
+			}
+		}
+	}
 }
 
 // setupAlarmListener subscribes the alarm listener. ok=false signals a
