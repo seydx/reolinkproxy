@@ -110,11 +110,11 @@ func (b *Bridge) runStream(
 		audioWindow = 0
 	}
 
-	emitVideo := func(pkts []*rtp.Packet, continuousUS uint64) {
+	emitVideo := func(pkts []*rtp.Packet, continuousUS uint64, keyframe bool) {
 		if len(pkts) == 0 {
 			return
 		}
-		pacer.enqueue(pacedFrame{pkts: pkts, media: videoMedia, mediaUS: continuousUS})
+		pacer.enqueue(pacedFrame{pkts: pkts, media: videoMedia, mediaUS: continuousUS, keyframe: keyframe})
 	}
 
 	controlTicker := time.NewTicker(time.Second)
@@ -308,7 +308,7 @@ func (b *Bridge) runStream(
 					for _, pkt := range pkts {
 						pkt.Timestamp = ts
 					}
-					emitVideo(pkts, continuousUS)
+					emitVideo(pkts, continuousUS, packet.Kind == baichuan.MediaPacketIFrame)
 				}
 
 				if !firstVideo || logPackets {

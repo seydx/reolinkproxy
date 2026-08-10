@@ -2,7 +2,6 @@ package bridge
 
 import (
 	"context"
-	"sync"
 	"time"
 
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
@@ -11,10 +10,13 @@ import (
 
 // pacedFrame is one logical emission: one or more RTP packets sharing the same
 // media time (e.g. one AAC AU or one HEVC AU split across RTP fragments).
+// keyframe marks a video I-frame, audio marks independently decodable audio.
 type pacedFrame struct {
-	pkts    []*rtp.Packet
-	media   *description.Media
-	mediaUS uint64
+	pkts     []*rtp.Packet
+	media    *description.Media
+	mediaUS  uint64
+	keyframe bool
+	audio    bool
 }
 
 // a media time this far from the anchor is a clock jump, not a schedule; the
@@ -57,42 +59,79 @@ type mediaPacer struct {
 	handler *rtspStreamHandler
 	log     Logger
 
-	overflowMu      sync.Mutex
+	// enqueue-side state; enqueue is only called from the runStream goroutine
+	awaitKeyframe   bool
+	droppedFrames   int
 	lastOverflowLog time.Time
 }
 
-// enqueue sends a paced frame to the pacer goroutine. A full queue drops the
-// oldest frame, so a stalled writer cannot pin a permanent backlog. Overflow
-// is logged at most once per minute.
+// enqueue sends a paced frame to the pacer goroutine. A full queue means the
+// writer cannot keep up; dropping single frames mid-GOP would leave every
+// reader with broken references, so the whole backlog is flushed and video
+// stays muted until the next keyframe starts a clean sequence. Audio frames
+// are independent and keep flowing.
 func (p *mediaPacer) enqueue(item pacedFrame) {
+	if p.awaitKeyframe {
+		switch {
+		case item.keyframe:
+			p.awaitKeyframe = false
+			p.reportDropped()
+		case item.audio:
+			// independently decodable, passes through the video mute
+		default:
+			p.droppedFrames++
+			return
+		}
+	}
+
 	select {
 	case p.ch <- item:
 		return
 	default:
 	}
 
-	select {
-	case <-p.ch:
-	default:
+	for {
+		select {
+		case <-p.ch:
+			p.droppedFrames++
+			continue
+		default:
+		}
+		break
 	}
-	select {
-	case p.ch <- item:
-	default:
+
+	if item.keyframe || item.audio {
+		select {
+		case p.ch <- item:
+		default:
+			p.droppedFrames++
+		}
+	} else {
+		p.droppedFrames++
 	}
-	p.warnOverflowOnce()
+
+	if item.keyframe {
+		p.reportDropped()
+	} else {
+		p.awaitKeyframe = true
+	}
 }
 
-// warnOverflowOnce logs a queue-overflow warning, rate-limited to once per
-// minute to avoid log spam under sustained overload.
-func (p *mediaPacer) warnOverflowOnce() {
-	p.overflowMu.Lock()
-	defer p.overflowMu.Unlock()
+// reportDropped logs how many frames an overflow cost, rate-limited to once
+// per minute to avoid log spam under sustained overload.
+func (p *mediaPacer) reportDropped() {
+	if p.droppedFrames == 0 {
+		return
+	}
+	dropped := p.droppedFrames
+	p.droppedFrames = 0
+
 	now := time.Now()
 	if now.Sub(p.lastOverflowLog) < 60*time.Second {
 		return
 	}
 	p.lastOverflowLog = now
-	p.log.Warnf("media pacer queue overflow (cap=%d); dropping frame", cap(p.ch))
+	p.log.Warnf("media pacer overflow (cap=%d); dropped %d frame(s), resuming at a keyframe", cap(p.ch), dropped)
 }
 
 // run drains pacedFrame values from the channel until ctx is cancelled or the

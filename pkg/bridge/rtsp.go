@@ -27,6 +27,9 @@ type rtspServerHandler struct {
 	talks   map[string]*rtspTalkPublisher
 	talkSDP map[string]*rtspTalkPublisher
 	server  *gortsplib.Server
+
+	writeErrMu      sync.Mutex
+	lastWriteErrLog time.Time
 }
 
 func newRTSPServerHandler(log Logger) *rtspServerHandler {
@@ -133,6 +136,20 @@ func sessionHasBackChannel(session *gortsplib.ServerSession) bool {
 	}
 
 	return false
+}
+
+// OnStreamWriteError fires when a reader's write queue overflowed and gortsplib
+// dropped a packet for it. Without this hook the drop only reaches the stdlib
+// logger, and a stalled consumer corrupts its stream invisibly.
+func (h *rtspServerHandler) OnStreamWriteError(ctx *gortsplib.ServerHandlerOnStreamWriteErrorCtx) {
+	h.writeErrMu.Lock()
+	defer h.writeErrMu.Unlock()
+	now := time.Now()
+	if now.Sub(h.lastWriteErrLog) < 60*time.Second {
+		return
+	}
+	h.lastWriteErrLog = now
+	h.log.Warnf("rtsp reader %s cannot keep up, dropping packets for it: %v", ctx.Session.Path(), ctx.Error)
 }
 
 func (h *rtspServerHandler) OnDescribe(ctx *gortsplib.ServerHandlerOnDescribeCtx) (*base.Response, *gortsplib.ServerStream, error) {
@@ -689,7 +706,7 @@ func (p *audioPublisher) processAAC(data []byte, timestamp mediaTimestamp, handl
 	}
 	p.published = true
 	samples := len(aus) * mpeg4audio.SamplesPerAccessUnit
-	p.audioPacer.enqueue(pacedFrame{pkts: pkts, media: p.media, mediaUS: p.nextMediaUS})
+	p.audioPacer.enqueue(pacedFrame{pkts: pkts, media: p.media, mediaUS: p.nextMediaUS, audio: true})
 
 	p.nextTimestamp = baseTimestamp + duration
 	p.nextMediaUS += uint64(samples) * 1_000_000 / uint64(cfg.SampleRate) //#nosec G115
@@ -763,7 +780,7 @@ func (p *audioPublisher) processADPCM(data []byte, timestamp mediaTimestamp, han
 		pkt.Timestamp += baseTimestamp
 	}
 	p.published = true
-	p.audioPacer.enqueue(pacedFrame{pkts: pkts, media: p.media, mediaUS: p.nextMediaUS})
+	p.audioPacer.enqueue(pacedFrame{pkts: pkts, media: p.media, mediaUS: p.nextMediaUS, audio: true})
 
 	p.nextTimestamp = baseTimestamp + duration
 	p.nextMediaUS += uint64(len(pcm)) * 1_000_000 / uint64(sampleRate) //#nosec G115

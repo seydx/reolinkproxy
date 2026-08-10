@@ -41,7 +41,7 @@ type Client struct {
 	pending   map[pendingKey]chan *Message
 
 	subMu sync.RWMutex
-	subs  map[uint32]map[chan *Message]struct{}
+	subs  map[uint32]map[*subscription]struct{}
 
 	closed    chan struct{}
 	closeOnce sync.Once
@@ -111,7 +111,7 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 		mode:          EncryptionNone,
 		binaryMsgNums: make(map[uint16]time.Time),
 		pending:       make(map[pendingKey]chan *Message),
-		subs:          make(map[uint32]map[chan *Message]struct{}),
+		subs:          make(map[uint32]map[*subscription]struct{}),
 		closed:        make(chan struct{}),
 	}
 
@@ -129,28 +129,34 @@ func (c *Client) readLoop() {
 			c.shutdown(err)
 			return
 		}
+		c.dispatch(msg)
+	}
+}
 
-		c.pendingMu.Lock()
-		respCh := c.pending[pendingKey{msgID: msg.Header.MsgID, msgNum: msg.Header.MsgNum}]
-		c.pendingMu.Unlock()
-		if respCh != nil {
-			select {
-			case respCh <- msg:
-			default:
-			}
+func (c *Client) dispatch(msg *Message) {
+	c.pendingMu.Lock()
+	respCh := c.pending[pendingKey{msgID: msg.Header.MsgID, msgNum: msg.Header.MsgNum}]
+	c.pendingMu.Unlock()
+	if respCh != nil {
+		select {
+		case respCh <- msg:
+		default:
 		}
+	}
 
-		c.subMu.RLock()
-		var subs []chan *Message
-		for ch := range c.subs[msg.Header.MsgID] {
-			subs = append(subs, ch)
-		}
-		c.subMu.RUnlock()
-		for _, ch := range subs {
-			select {
-			case ch <- msg:
-			default:
-			}
+	c.subMu.RLock()
+	var subs []*subscription
+	for sub := range c.subs[msg.Header.MsgID] {
+		subs = append(subs, sub)
+	}
+	c.subMu.RUnlock()
+	for _, sub := range subs {
+		select {
+		case sub.ch <- msg:
+		default:
+			// the counter lets stateful consumers (bcmedia) notice the gap
+			// instead of stitching unrelated bytes together
+			sub.dropped.Add(1)
 		}
 	}
 }
@@ -316,25 +322,37 @@ func (c *Client) keepAliveLoop() {
 	}
 }
 
+// subscription is one fanout listener. dropped counts messages the readLoop
+// could not deliver because ch was full.
+type subscription struct {
+	ch      chan *Message
+	dropped atomic.Uint64
+}
+
 // Subscribe attaches a best-effort fanout listener for a given msg_id.
 func (c *Client) Subscribe(msgID uint32) (<-chan *Message, func()) {
+	sub, unsubscribe := c.subscribe(msgID)
+	return sub.ch, unsubscribe
+}
+
+func (c *Client) subscribe(msgID uint32) (*subscription, func()) {
 	// Generous buffer: the preview subscription carries a full 4K media
 	// stream, and a dropped message desyncs the bcmedia parser.
-	ch := make(chan *Message, 256)
+	sub := &subscription{ch: make(chan *Message, 256)}
 
 	c.subMu.Lock()
 	if c.subs[msgID] == nil {
-		c.subs[msgID] = make(map[chan *Message]struct{})
+		c.subs[msgID] = make(map[*subscription]struct{})
 	}
-	c.subs[msgID][ch] = struct{}{}
+	c.subs[msgID][sub] = struct{}{}
 	c.subMu.Unlock()
 
 	var once sync.Once
-	return ch, func() {
+	return sub, func() {
 		once.Do(func() {
 			c.subMu.Lock()
 			if subs := c.subs[msgID]; subs != nil {
-				delete(subs, ch)
+				delete(subs, sub)
 				if len(subs) == 0 {
 					delete(c.subs, msgID)
 				}
@@ -356,7 +374,7 @@ func (c *Client) StartPreview(ctx context.Context, channel uint8, stream Stream)
 		return nil, err
 	}
 
-	sub, unsubscribe := c.Subscribe(msgIDVideo)
+	sub, unsubscribe := c.subscribe(msgIDVideo)
 	if _, err := c.sendRequest(ctx, request{
 		MsgID:      msgIDVideo,
 		ChannelID:  headerChannelID(channel),
@@ -398,13 +416,21 @@ func (c *Client) StartPreview(ctx context.Context, channel uint8, stream Stream)
 				return
 			case <-stop:
 				return
-			case msg := <-sub:
+			case msg := <-sub.ch:
 				if msg == nil || !msg.Binary || len(msg.Payload) == 0 {
 					continue
 				}
 
 				if msg.Header.StreamType != streamType {
 					continue
+				}
+
+				// a dropped fanout message leaves a hole in the byte stream; the
+				// parser would complete the current frame with unrelated bytes
+				// and hand corrupt video downstream, so give up before feeding it
+				if dropped := sub.dropped.Load(); dropped > 0 {
+					reader.setErr(fmt.Errorf("bcmedia stream lost %d message(s), consumer too slow", dropped))
+					return
 				}
 
 				parsed, err := parser.Append(msg.Payload)

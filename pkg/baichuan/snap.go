@@ -55,7 +55,7 @@ func (c *Client) Snap(ctx context.Context, channel uint8) ([]byte, error) {
 	}
 
 	// Subscribe before sending so no chunk is missed.
-	sub, unsubscribe := c.Subscribe(msgIDSnap)
+	sub, unsubscribe := c.subscribe(msgIDSnap)
 	defer unsubscribe()
 
 	resp, err := c.sendRequest(ctx, request{
@@ -81,9 +81,14 @@ func (c *Client) Snap(ctx context.Context, channel uint8) ([]byte, error) {
 				return nil, err
 			}
 			return nil, context.Canceled
-		case msg := <-sub:
+		case msg := <-sub.ch:
 			if msg == nil || !msg.Binary || len(msg.Payload) == 0 {
 				continue
+			}
+			// a dropped chunk cannot be recovered, fail instead of assembling
+			// a truncated JPEG
+			if sub.dropped.Load() > 0 {
+				return nil, fmt.Errorf("snapshot chunk lost, consumer too slow")
 			}
 			buf.Write(msg.Payload)
 
