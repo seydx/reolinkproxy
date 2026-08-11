@@ -36,11 +36,6 @@ type Options struct {
 	LogPackets bool
 	// Logger receives bridge logs. Defaults to NopLogger.
 	Logger Logger
-
-	// Pacer tuning; zero values use the defaults noted below. Audio and video
-	// share one pacer, so one setting covers both.
-	PacerInitialLatency time.Duration // default 1.5s
-	PacerMaxLead        time.Duration // default 3s
 }
 
 func (o *Options) applyDefaults() {
@@ -49,12 +44,6 @@ func (o *Options) applyDefaults() {
 	}
 	if o.Logger == nil {
 		o.Logger = NopLogger{}
-	}
-	if o.PacerInitialLatency == 0 {
-		o.PacerInitialLatency = 1500 * time.Millisecond
-	}
-	if o.PacerMaxLead == 0 {
-		o.PacerMaxLead = 3 * time.Second
 	}
 }
 

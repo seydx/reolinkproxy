@@ -44,7 +44,7 @@ func (b *Bridge) runStream(
 	hint *AudioHint,
 	onHint func(AudioHint),
 ) {
-	// per-camera logger, so stream and pacer messages name the camera they belong to
+	// per-camera logger, so stream messages name the camera they belong to
 	log := device.log
 	logPackets := b.opts.LogPackets
 	var (
@@ -77,17 +77,9 @@ func (b *Bridge) runStream(
 	var startupDeadline time.Time
 	var confirmDeadline time.Time
 
-	pacer := &mediaPacer{
-		ch:      make(chan pacedFrame, 600),
-		cursor:  paceCursor{maxLead: b.opts.PacerMaxLead, initialLatency: b.opts.PacerInitialLatency},
-		handler: handler,
-		log:     log,
-	}
-	go pacer.run(ctx)
-
 	// audio that misses the window still teaches the next session to be patient
 	rebuildForAudio := false
-	audio := &audioPublisher{audioPacer: pacer, log: log, onLateAudio: func() {
+	audio := &audioPublisher{log: log, onLateAudio: func() {
 		device.setAudioKnown(stream, true)
 		rebuildForAudio = true
 	}}
@@ -108,13 +100,6 @@ func (b *Bridge) runStream(
 		}
 	case hint.Codec == "":
 		audioWindow = 0
-	}
-
-	emitVideo := func(pkts []*rtp.Packet, continuousUS uint64, keyframe bool) {
-		if len(pkts) == 0 {
-			return
-		}
-		pacer.enqueue(pacedFrame{pkts: pkts, media: videoMedia, mediaUS: continuousUS, keyframe: keyframe})
 	}
 
 	controlTicker := time.NewTicker(time.Second)
@@ -307,8 +292,8 @@ func (b *Bridge) runStream(
 					ts := videoRTP.next(rawVideoRTP)
 					for _, pkt := range pkts {
 						pkt.Timestamp = ts
+						handler.writePacket(videoMedia, pkt)
 					}
-					emitVideo(pkts, continuousUS, packet.Kind == baichuan.MediaPacketIFrame)
 				}
 
 				if !firstVideo || logPackets {

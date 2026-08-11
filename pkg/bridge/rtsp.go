@@ -519,11 +519,9 @@ type audioPublisher struct {
 	aacEncoder     *rtpmpeg4audio.Encoder
 	g711Encoder    *rtplpcm.Encoder
 	adpcmDecoder   *codec.ADPCMDecoder
-	audioPacer     *mediaPacer
 	log            Logger
 	onLateAudio    func()
 	nextTimestamp  uint32
-	nextMediaUS    uint64
 	anchored       bool
 	declaredRate   int
 	declaredChans  int
@@ -697,19 +695,16 @@ func (p *audioPublisher) processAAC(data []byte, timestamp mediaTimestamp, handl
 	baseTimestamp := p.nextTimestamp
 	if hasExpectedTS && (timestamp.Authoritative || !p.anchored) {
 		baseTimestamp = expectedTS
-		p.nextMediaUS = timestamp.Microseconds
 		p.anchored = true
 	}
 	baseTimestamp = p.timestampGuard.applyBaseToPackets(pkts, baseTimestamp, duration)
 	for _, pkt := range pkts {
 		pkt.Timestamp += baseTimestamp
+		handler.writePacket(p.media, pkt)
 	}
 	p.published = true
-	samples := len(aus) * mpeg4audio.SamplesPerAccessUnit
-	p.audioPacer.enqueue(pacedFrame{pkts: pkts, media: p.media, mediaUS: p.nextMediaUS, audio: true})
 
 	p.nextTimestamp = baseTimestamp + duration
-	p.nextMediaUS += uint64(samples) * 1_000_000 / uint64(cfg.SampleRate) //#nosec G115
 	return nil
 }
 
@@ -772,18 +767,16 @@ func (p *audioPublisher) processADPCM(data []byte, timestamp mediaTimestamp, han
 	baseTimestamp := p.nextTimestamp
 	if hasExpectedTS && (timestamp.Authoritative || !p.anchored) {
 		baseTimestamp = expectedTS
-		p.nextMediaUS = timestamp.Microseconds
 		p.anchored = true
 	}
 	baseTimestamp = p.timestampGuard.applyBaseToPackets(pkts, baseTimestamp, duration)
 	for _, pkt := range pkts {
 		pkt.Timestamp += baseTimestamp
+		handler.writePacket(p.media, pkt)
 	}
 	p.published = true
-	p.audioPacer.enqueue(pacedFrame{pkts: pkts, media: p.media, mediaUS: p.nextMediaUS, audio: true})
 
 	p.nextTimestamp = baseTimestamp + duration
-	p.nextMediaUS += uint64(len(pcm)) * 1_000_000 / uint64(sampleRate) //#nosec G115
 	return nil
 }
 

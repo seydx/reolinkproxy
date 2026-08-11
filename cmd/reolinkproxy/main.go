@@ -30,18 +30,14 @@ type serverFlags struct {
 	PprofAddress            string
 	LogLevel                string
 	LogPackets              bool
-	PacerInitialLatMs       int
-	PacerMaxLeadMs          int
 	EnableRTCPSenderReports bool
 }
 
 var flags = serverFlags{
-	RTSPAddress:       ":8554",
-	RTPAddress:        ":8000",
-	RTCPAddress:       ":8001",
-	LogLevel:          "info",
-	PacerInitialLatMs: 1500,
-	PacerMaxLeadMs:    3000,
+	RTSPAddress: ":8554",
+	RTPAddress:  ":8000",
+	RTCPAddress: ":8001",
+	LogLevel:    "info",
 }
 
 func envVars(names ...string) cli.ValueSourceChain {
@@ -104,20 +100,6 @@ func main() {
 				Value:       flags.LogPackets,
 				Destination: &flags.LogPackets,
 			},
-			&cli.IntFlag{
-				Name:        "server-pacer-initial-latency-ms",
-				Usage:       "RTSP pacer startup delay in ms (smooths bursts; default 1500)",
-				Sources:     envVars("SERVER_PACER_INITIAL_LATENCY_MS"),
-				Value:       flags.PacerInitialLatMs,
-				Destination: &flags.PacerInitialLatMs,
-			},
-			&cli.IntFlag{
-				Name:        "server-pacer-max-lead-ms",
-				Usage:       "max pacer cursor distance from wall clock in ms before re-anchoring (default 3000)",
-				Sources:     envVars("SERVER_PACER_MAX_LEAD_MS"),
-				Value:       flags.PacerMaxLeadMs,
-				Destination: &flags.PacerMaxLeadMs,
-			},
 			&cli.BoolFlag{
 				Name:        "server-enable-rtcp-sender-reports",
 				Usage:       "emit periodic RTCP Sender Reports (default off; enable for legacy clients that require SR)",
@@ -171,8 +153,6 @@ func runApp(ctx context.Context, log *appLogger, cameras []bridge.CameraConfig) 
 		EnableRTCPSenderReports: flags.EnableRTCPSenderReports,
 		LogPackets:              flags.LogPackets,
 		Logger:                  log,
-		PacerInitialLatency:     time.Duration(flags.PacerInitialLatMs) * time.Millisecond,
-		PacerMaxLead:            time.Duration(flags.PacerMaxLeadMs) * time.Millisecond,
 	})
 	if err := b.Start(); err != nil {
 		return err
