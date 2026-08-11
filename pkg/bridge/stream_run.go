@@ -48,17 +48,17 @@ func (b *Bridge) runStream(
 	log := device.log
 	logPackets := b.opts.LogPackets
 	var (
-		firstVideo       bool
-		videoFormat      format.Format
-		videoEncoder     any
-		paused           bool
-		pauseReason      string
-		lastWidth        uint32
-		lastHeight       uint32
-		streamTimestamps timestampUnwrapper
-		videoRTP         rtpTimestampGuard
-		lastVideoUS      uint64
-		haveVideoUS      bool
+		firstVideo   bool
+		videoFormat  format.Format
+		videoEncoder any
+		paused       bool
+		pauseReason  string
+		lastWidth    uint32
+		lastHeight   uint32
+		timeline     mediaTimeline
+		videoRTP     rtpTimestampGuard
+		lastVideoUS  uint64
+		haveVideoUS  bool
 	)
 
 	videoMedia := &description.Media{
@@ -162,7 +162,7 @@ func (b *Bridge) runStream(
 					log.Debugf("stream %s skipping video packet without timestamp", meta.name)
 					continue
 				}
-				continuousUS := streamTimestamps.unwrap(packet.TimestampMicrosecs)
+				continuousUS := timeline.video(packet.TimestampMicrosecs)
 				lastVideoUS, haveVideoUS = continuousUS, true
 
 				if videoFormat == nil {
@@ -302,13 +302,13 @@ func (b *Bridge) runStream(
 				}
 
 			case baichuan.MediaPacketAAC:
-				timestamp := audioTimestampForPacket(packet, &streamTimestamps, lastVideoUS, haveVideoUS)
+				timestamp := audioTimestampForPacket(packet, &timeline, lastVideoUS, haveVideoUS)
 				if err := audio.processAAC(packet.Data, timestamp, handler, meta, !updatePauseState(time.Now())); err != nil {
 					log.Warnf("stream %s audio publish error: %v", meta.name, err)
 				}
 
 			case baichuan.MediaPacketADPCM:
-				timestamp := audioTimestampForPacket(packet, &streamTimestamps, lastVideoUS, haveVideoUS)
+				timestamp := audioTimestampForPacket(packet, &timeline, lastVideoUS, haveVideoUS)
 				if err := audio.processADPCM(packet.Data, timestamp, handler, meta, !updatePauseState(time.Now())); err != nil {
 					log.Warnf("stream %s audio adpcm publish error: %v", meta.name, err)
 				}
@@ -318,6 +318,64 @@ func (b *Bridge) runStream(
 			updatePauseState(time.Now())
 		}
 	}
+}
+
+const (
+	// video frames arrive back to back, so a consecutive delta far from the
+	// frame duration is a camera clock hiccup, not a schedule
+	maxTrustedVideoDeltaUS = 500_000
+	// stands in for the average until a trusted delta was seen (25 fps)
+	fallbackVideoDeltaUS = 40_000
+	videoDeltaEMAAlpha   = 0.1
+)
+
+// mediaTimeline turns the camera clock into one continuous timeline for both
+// tracks. Untrusted video deltas are replaced with the smoothed frame delta,
+// and the correction is carried as an offset so audio timestamps land on the
+// same corrected timeline instead of drifting away from the video.
+type mediaTimeline struct {
+	unwrapper  timestampUnwrapper
+	offset     int64
+	lastVideo  uint64
+	avgDeltaUS float64
+	haveVideo  bool
+}
+
+func (t *mediaTimeline) video(ts32 uint32) uint64 {
+	us := t.corrected(ts32)
+	if !t.haveVideo {
+		t.haveVideo = true
+		t.lastVideo = us
+		return us
+	}
+	delta := int64(us) - int64(t.lastVideo) //#nosec G115
+	switch {
+	case delta <= 0 || delta > maxTrustedVideoDeltaUS:
+		step := int64(t.avgDeltaUS)
+		if step <= 0 {
+			step = fallbackVideoDeltaUS
+		}
+		t.offset += delta - step
+		us = t.lastVideo + uint64(step) //#nosec G115
+	case t.avgDeltaUS == 0:
+		t.avgDeltaUS = float64(delta)
+	default:
+		t.avgDeltaUS += (float64(delta) - t.avgDeltaUS) * videoDeltaEMAAlpha
+	}
+	t.lastVideo = us
+	return us
+}
+
+func (t *mediaTimeline) audio(ts32 uint32) uint64 {
+	return t.corrected(ts32)
+}
+
+func (t *mediaTimeline) corrected(ts32 uint32) uint64 {
+	us := int64(t.unwrapper.unwrap(ts32)) - t.offset //#nosec G115
+	if us < 0 {
+		return 0
+	}
+	return uint64(us)
 }
 
 type timestampUnwrapper struct {
@@ -434,10 +492,10 @@ func reportAudioHint(onHint func(AudioHint), audio *audioPublisher) {
 // both tracks end up describing the same media time. Camera audio and video
 // run on one clock (measured: 6.080s of samples against a 6.058s video span),
 // so counting samples keeps them together from that anchor on.
-func audioTimestampForPacket(packet baichuan.MediaPacket, audioTimestamps *timestampUnwrapper, videoUS uint64, haveVideoUS bool) mediaTimestamp {
+func audioTimestampForPacket(packet baichuan.MediaPacket, timeline *mediaTimeline, videoUS uint64, haveVideoUS bool) mediaTimestamp {
 	if packet.HasTimestamp {
 		return mediaTimestamp{
-			Microseconds:  audioTimestamps.unwrap(packet.TimestampMicrosecs),
+			Microseconds:  timeline.audio(packet.TimestampMicrosecs),
 			Valid:         true,
 			Authoritative: true,
 		}

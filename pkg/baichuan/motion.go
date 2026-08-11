@@ -95,8 +95,9 @@ func (c *Client) ListenForAlarms(ctx context.Context, channel uint8, callback fu
 	}
 
 	// dual-lens cameras may alarm on the telephoto stream channel, both
-	// lenses belong to this camera
-	dualLens := c.LoginDeviceInfo().IsDualLens()
+	// lenses belong to the channel-0 camera; a separately adopted tele
+	// channel only owns its own alarms
+	dualLens := channel == 0 && c.LoginDeviceInfo().IsDualLens()
 
 	motionSub, unsubscribeMotion := c.Subscribe(msgIDMotion)
 	stop := make(chan struct{})

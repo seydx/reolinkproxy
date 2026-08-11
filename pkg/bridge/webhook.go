@@ -135,7 +135,7 @@ func (c *Camera) handleWebhookPush(body []byte) {
 	if push.XML != "" {
 		switch push.Cmd {
 		case 33:
-			if state, matched, err := baichuan.ParseAlarmStateXML(push.XML, channel, c.device.DualLens()); err == nil && matched {
+			if state, matched, err := baichuan.ParseAlarmStateXML(push.XML, channel, channel == 0 && c.device.DualLens()); err == nil && matched {
 				c.handleAlarm(state)
 			}
 		case 252, 253:
