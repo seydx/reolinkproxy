@@ -6,14 +6,14 @@ import (
 	"time"
 )
 
-func catchUp(d time.Duration) *atomic.Int64 {
+func catchUp() *atomic.Int64 {
 	v := &atomic.Int64{}
-	v.Store(int64(d))
+	v.Store(int64(defaultLiveCatchUp))
 	return v
 }
 
 func TestLiveEdgeKeepsASteadyStreamFlowing(t *testing.T) {
-	live := liveEdge{maxLag: catchUp(defaultLiveCatchUp)}
+	live := liveEdge{maxLag: catchUp()}
 	start := time.Unix(1000, 0)
 
 	for i := range 100 {
@@ -26,7 +26,7 @@ func TestLiveEdgeKeepsASteadyStreamFlowing(t *testing.T) {
 }
 
 func TestLiveEdgeSkipsBacklogUntilKeyframe(t *testing.T) {
-	live := liveEdge{maxLag: catchUp(defaultLiveCatchUp)}
+	live := liveEdge{maxLag: catchUp()}
 	start := time.Unix(1000, 0)
 	live.behind(0, true, start)
 
@@ -60,7 +60,7 @@ func TestLiveEdgeIgnoresACameraGapButCatchesUpOnABacklog(t *testing.T) {
 	start := time.Unix(1000, 0)
 
 	gap := testTimeline()
-	gapLive := liveEdge{maxLag: catchUp(defaultLiveCatchUp)}
+	gapLive := liveEdge{maxLag: catchUp()}
 	_, raw := gap.video(1_000_000)
 	gapLive.behind(raw, true, start)
 
@@ -71,7 +71,7 @@ func TestLiveEdgeIgnoresACameraGapButCatchesUpOnABacklog(t *testing.T) {
 	}
 
 	backlog := testTimeline()
-	backlogLive := liveEdge{maxLag: catchUp(defaultLiveCatchUp)}
+	backlogLive := liveEdge{maxLag: catchUp()}
 	_, raw = backlog.video(1_000_000)
 	backlogLive.behind(raw, true, start)
 
@@ -83,7 +83,7 @@ func TestLiveEdgeIgnoresACameraGapButCatchesUpOnABacklog(t *testing.T) {
 }
 
 func TestLiveEdgeToleratesShortStalls(t *testing.T) {
-	live := liveEdge{maxLag: catchUp(defaultLiveCatchUp)}
+	live := liveEdge{maxLag: catchUp()}
 	start := time.Unix(1000, 0)
 	live.behind(0, true, start)
 
@@ -161,7 +161,7 @@ func TestLiveEdgeOffPassesEverythingOn(t *testing.T) {
 }
 
 func TestLiveEdgeAppliesAChangedThresholdWithoutRestart(t *testing.T) {
-	maxLag := catchUp(defaultLiveCatchUp)
+	maxLag := catchUp()
 	live := liveEdge{maxLag: maxLag}
 	start := time.Unix(1000, 0)
 	live.behind(0, true, start)
