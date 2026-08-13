@@ -41,6 +41,10 @@ type CameraConfig struct {
 	PauseOnClient bool
 	// PauseTimeout is the motion-inactive duration before pausing (default 1s).
 	PauseTimeout time.Duration
+	// LiveCatchUp bounds how far the picture may trail live before the stream
+	// drops the backlog and resumes at the next keyframe. Nil uses the
+	// default, zero turns catching up off and passes late video on as it is.
+	LiveCatchUp *time.Duration
 	// IdleDisconnect stops the underlying Baichuan preview session after a
 	// stream has had no RTSP clients or DESCRIBE/SETUP interest for
 	// IdleTimeout, and restarts it on the next client.
@@ -95,6 +99,10 @@ func (c *CameraConfig) ApplyDefaults() {
 	c.TalkProfile = normalizeProfileName(c.TalkProfile)
 	if c.TalkVolume == 0 {
 		c.TalkVolume = 100
+	}
+	if c.LiveCatchUp == nil {
+		fallback := defaultLiveCatchUp
+		c.LiveCatchUp = &fallback
 	}
 	if c.PauseTimeout == 0 {
 		c.PauseTimeout = time.Second

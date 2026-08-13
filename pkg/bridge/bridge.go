@@ -356,6 +356,7 @@ func (b *Bridge) setupCameraStreams(
 			wantStream,
 			hint,
 			func(observed AudioHint) { cam.reportAudioHint(profile, observed) },
+			*cfg.LiveCatchUp,
 		)
 	}
 

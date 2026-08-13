@@ -22,6 +22,13 @@ type cameraDevice struct {
 	// false when the connection is dropped. Write-once before use.
 	onState func(connected bool)
 
+	// state changes are queued and delivered by a single goroutine: a
+	// reconnect fires false and true a moment apart, and delivering them out
+	// of order would leave a live camera marked offline
+	stateMu       sync.Mutex
+	statePending  []bool
+	stateDraining bool
+
 	// webhookFailed latches after the camera rejected the webhook
 	// subscription (unsupported firmware) so it is not retried on every reconnect.
 	webhookFailed bool
@@ -95,9 +102,7 @@ func (m *cameraDevice) Ensure(ctx context.Context) (*baichuan.Client, error) {
 
 	m.client = client
 	m.dualLens = client.LoginDeviceInfo().IsDualLens()
-	if m.onState != nil {
-		go m.onState(true)
-	}
+	m.notifyState(true)
 	return client, nil
 }
 
@@ -151,9 +156,40 @@ func (m *cameraDevice) closeLocked(reason string) {
 	}
 	_ = m.client.Close()
 	m.client = nil
-	if m.onState != nil {
-		go m.onState(false)
+	m.notifyState(false)
+}
+
+// notifyState hands a connection state to the callback without blocking the
+// caller, which holds the device lock, while keeping the order of the states.
+func (m *cameraDevice) notifyState(connected bool) {
+	if m.onState == nil {
+		return
 	}
+
+	m.stateMu.Lock()
+	m.statePending = append(m.statePending, connected)
+	if m.stateDraining {
+		m.stateMu.Unlock()
+		return
+	}
+	m.stateDraining = true
+	m.stateMu.Unlock()
+
+	go func() {
+		for {
+			m.stateMu.Lock()
+			if len(m.statePending) == 0 {
+				m.stateDraining = false
+				m.stateMu.Unlock()
+				return
+			}
+			next := m.statePending[0]
+			m.statePending = m.statePending[1:]
+			m.stateMu.Unlock()
+
+			m.onState(next)
+		}
+	}()
 }
 
 // StreamPackets pulls preview media for one channel/stream, reconnecting on
@@ -212,17 +248,14 @@ func (m *cameraDevice) StreamPackets(ctx context.Context, channel uint8, stream 
 				continue
 			}
 
-			if done := m.pumpPreview(ctx, client, channel, stream, reader, out, wantStream); done {
+			switch m.pumpPreview(ctx, client, channel, stream, reader, out, wantStream) {
+			case previewContextDone:
 				return
-			}
-
-			// A media desync only affects this stream — keep the shared client
-			// (event listener, other streams), stop the camera-side session
-			// and restart the preview with a fresh parser.
-			if reader.Err() != nil {
-				_ = client.StopPreview(ctx, channel, stream)
-			} else if wantStream == nil || wantStream() {
-				m.ResetIfCurrent(client, "preview stream ended")
+			case previewResetClient:
+				if wantStream == nil || wantStream() {
+					m.ResetIfCurrent(client, "preview stream ended")
+				}
+			case previewRestart:
 			}
 			time.Sleep(100 * time.Millisecond) // brief wait before reconnect
 		}
@@ -231,9 +264,19 @@ func (m *cameraDevice) StreamPackets(ctx context.Context, channel uint8, stream 
 	return out
 }
 
+// previewOutcome says what the caller has to do after a preview session ended.
+type previewOutcome int
+
+const (
+	previewContextDone previewOutcome = iota
+	// previewRestart affects this stream only: the camera-side session is
+	// already stopped, just start a new preview on the same client
+	previewRestart
+	// previewResetClient means the shared connection itself looks broken
+	previewResetClient
+)
+
 // pumpPreview forwards media packets from one preview session until it ends.
-// done=true means the caller's context is finished; false asks for a session
-// restart.
 func (m *cameraDevice) pumpPreview(
 	ctx context.Context,
 	client *baichuan.Client,
@@ -242,7 +285,7 @@ func (m *cameraDevice) pumpPreview(
 	reader *baichuan.MediaReader,
 	out chan<- baichuan.MediaPacket,
 	wantStream func() bool,
-) bool {
+) previewOutcome {
 	stallTimer := time.NewTimer(15 * time.Second)
 	defer stallTimer.Stop()
 	idleTicker := time.NewTicker(time.Second)
@@ -251,17 +294,22 @@ func (m *cameraDevice) pumpPreview(
 	for {
 		select {
 		case <-ctx.Done():
-			return true
+			return previewContextDone
 		case packet, ok := <-reader.Packets:
 			if !ok {
+				// A media desync only affects this stream — keep the shared
+				// client (event listener, other streams) and restart the
+				// preview with a fresh parser.
 				if err := reader.Err(); err != nil {
 					m.log.Warnf("stream %s channel %d media desync, restarting preview: %v", m.cameraName, channel, err)
+					_ = client.StopPreview(ctx, channel, stream)
+					return previewRestart
 				}
-				return false
+				return previewResetClient
 			}
 			select {
 			case <-ctx.Done():
-				return true
+				return previewContextDone
 			case out <- packet:
 			}
 			if !stallTimer.Stop() {
@@ -272,16 +320,18 @@ func (m *cameraDevice) pumpPreview(
 			}
 			stallTimer.Reset(15 * time.Second)
 		case <-stallTimer.C:
-			m.log.Warnf("stream %s channel %d stalled for 15s, reconnecting", m.cameraName, channel)
-			m.ResetIfCurrent(client, "stream stalled for 15s")
-			return false
+			// one silent stream says nothing about the connection: the
+			// keepalive owns that verdict, so only this preview restarts
+			m.log.Warnf("stream %s channel %d stalled for 15s, restarting preview", m.cameraName, channel)
+			_ = client.StopPreview(ctx, channel, stream)
+			return previewRestart
 		case <-idleTicker.C:
 			if wantStream != nil && !wantStream() {
 				m.log.Debugf("stream %s channel %d idle, stopping preview", m.cameraName, channel)
 				if err := client.StopPreview(ctx, channel, stream); err != nil {
 					m.ResetIfCurrent(client, fmt.Sprintf("idle preview stop failed: %v", err))
 				}
-				return false
+				return previewRestart
 			}
 		}
 	}

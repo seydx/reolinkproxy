@@ -48,6 +48,9 @@ type Client struct {
 	closeErr  closeState
 	wg        sync.WaitGroup
 
+	// lastRead is when a message last came off the wire, in unix nanos
+	lastRead atomic.Int64
+
 	keepAliveOnce sync.Once
 
 	// alarmPushed latches once the camera has pushed an alarm event on this
@@ -129,6 +132,7 @@ func (c *Client) readLoop() {
 			c.shutdown(err)
 			return
 		}
+		c.lastRead.Store(time.Now().UnixNano())
 		c.dispatch(msg)
 	}
 }
@@ -298,6 +302,7 @@ func (c *Client) keepAliveLoop() {
 				continue
 			}
 
+			sentAt := time.Now()
 			pingCtx, cancel := context.WithTimeout(context.Background(), pingTimeout)
 			_, err := c.sendRequest(pingCtx, request{
 				MsgID:     msgIDPing,
@@ -307,6 +312,14 @@ func (c *Client) keepAliveLoop() {
 			cancel()
 
 			if err == nil {
+				pingFailures = 0
+				continue
+			}
+
+			// A camera on a congested link answers late because the reply is
+			// queued behind its video backlog, not because it is gone. Bytes
+			// arriving after the ping went out prove the link is alive.
+			if last := c.lastRead.Load(); last > sentAt.UnixNano() {
 				pingFailures = 0
 				continue
 			}

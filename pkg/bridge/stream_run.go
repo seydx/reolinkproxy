@@ -43,6 +43,7 @@ func (b *Bridge) runStream(
 	wantStream func() bool,
 	hint *AudioHint,
 	onHint func(AudioHint),
+	liveCatchUp time.Duration,
 ) {
 	// per-camera logger, so stream messages name the camera they belong to
 	log := device.log
@@ -60,6 +61,8 @@ func (b *Bridge) runStream(
 		lastVideoUS  uint64
 		haveVideoUS  bool
 	)
+
+	live := liveEdge{log: log, name: meta.name, maxLag: liveCatchUp}
 
 	videoMedia := &description.Media{
 		Type:    description.MediaTypeVideo,
@@ -162,7 +165,7 @@ func (b *Bridge) runStream(
 					log.Debugf("stream %s skipping video packet without timestamp", meta.name)
 					continue
 				}
-				continuousUS := timeline.video(packet.TimestampMicrosecs)
+				continuousUS, cameraUS := timeline.video(packet.TimestampMicrosecs)
 				lastVideoUS, haveVideoUS = continuousUS, true
 
 				if videoFormat == nil {
@@ -268,7 +271,11 @@ func (b *Bridge) runStream(
 					continue
 				}
 
-				streamPaused := updatePauseState(time.Now())
+				now := time.Now()
+				streamPaused := updatePauseState(now)
+				if live.behind(cameraUS, packet.Kind == baichuan.MediaPacketIFrame, now) {
+					continue
+				}
 
 				var pkts []*rtp.Packet
 				var err error
@@ -303,13 +310,13 @@ func (b *Bridge) runStream(
 
 			case baichuan.MediaPacketAAC:
 				timestamp := audioTimestampForPacket(packet, &timeline, lastVideoUS, haveVideoUS)
-				if err := audio.processAAC(packet.Data, timestamp, handler, meta, !updatePauseState(time.Now())); err != nil {
+				if err := audio.processAAC(packet.Data, timestamp, handler, meta, !updatePauseState(time.Now()) && !live.catchingUp); err != nil {
 					log.Warnf("stream %s audio publish error: %v", meta.name, err)
 				}
 
 			case baichuan.MediaPacketADPCM:
 				timestamp := audioTimestampForPacket(packet, &timeline, lastVideoUS, haveVideoUS)
-				if err := audio.processADPCM(packet.Data, timestamp, handler, meta, !updatePauseState(time.Now())); err != nil {
+				if err := audio.processADPCM(packet.Data, timestamp, handler, meta, !updatePauseState(time.Now()) && !live.catchingUp); err != nil {
 					log.Warnf("stream %s audio adpcm publish error: %v", meta.name, err)
 				}
 			}
@@ -318,6 +325,87 @@ func (b *Bridge) runStream(
 			updatePauseState(time.Now())
 		}
 	}
+}
+
+// defaultLiveCatchUp is how far the picture may fall behind the live edge
+// before the stream skips ahead. Bursts after a short network stall stay
+// under it.
+const defaultLiveCatchUp = 3 * time.Second
+
+// liveEdge measures how far the media clock has fallen behind the wall clock.
+// A camera on a lossy link queues video it cannot send and delivers it late in
+// bursts; passing that backlog on would leave every viewer permanently behind,
+// so the stream drops it and resumes at the next keyframe.
+type liveEdge struct {
+	log  Logger
+	name string
+	// maxLag of zero passes late video on untouched, so nothing a recorder
+	// might want is dropped
+	maxLag time.Duration
+
+	wallAnchor  time.Time
+	mediaAnchor uint64
+	anchored    bool
+	catchingUp  bool
+	lag         time.Duration
+	skipped     int
+	lastLog     time.Time
+}
+
+// behind reports whether this frame should be dropped to get back to live.
+func (l *liveEdge) behind(mediaUS uint64, keyframe bool, now time.Time) bool {
+	if l.maxLag <= 0 {
+		return false
+	}
+	if !l.anchored {
+		l.anchor(mediaUS, now)
+		return false
+	}
+
+	lag := now.Sub(l.wallAnchor) - time.Duration(mediaUS-l.mediaAnchor)*time.Microsecond
+	switch {
+	case lag < 0:
+		// the media clock caught up with the wall clock, this is the live edge
+		l.anchor(mediaUS, now)
+	case lag > l.maxLag:
+		l.catchingUp = true
+		l.lag = lag
+	}
+
+	if !l.catchingUp {
+		return false
+	}
+	if !keyframe {
+		l.skipped++
+		return true
+	}
+
+	l.catchingUp = false
+	l.anchor(mediaUS, now)
+	l.report()
+	return false
+}
+
+func (l *liveEdge) anchor(mediaUS uint64, now time.Time) {
+	l.wallAnchor, l.mediaAnchor, l.anchored = now, mediaUS, true
+}
+
+// report logs a completed catch-up, rate-limited to once per minute so a
+// permanently struggling link does not fill the log.
+func (l *liveEdge) report() {
+	skipped, lag := l.skipped, l.lag
+	l.skipped, l.lag = 0, 0
+	if skipped == 0 || l.log == nil {
+		return
+	}
+
+	now := time.Now()
+	if now.Sub(l.lastLog) < time.Minute {
+		return
+	}
+	l.lastLog = now
+	l.log.Warnf("stream %s ran %s behind live, skipped %d frame(s) to catch up; the camera cannot deliver its video in time",
+		l.name, lag.Round(time.Second), skipped)
 }
 
 const (
@@ -341,12 +429,16 @@ type mediaTimeline struct {
 	haveVideo  bool
 }
 
-func (t *mediaTimeline) video(ts32 uint32) uint64 {
-	us := t.corrected(ts32)
+// video returns the timestamp to publish and the raw camera time behind it.
+// The raw value skips the gap correction, so a caller measuring how far the
+// picture trails live cannot mistake a corrected gap for a delivery backlog.
+func (t *mediaTimeline) video(ts32 uint32) (mediaUS uint64, rawUS uint64) {
+	raw := t.unwrapper.unwrap(ts32)
+	us := t.applyOffset(raw)
 	if !t.haveVideo {
 		t.haveVideo = true
 		t.lastVideo = us
-		return us
+		return us, raw
 	}
 	delta := int64(us) - int64(t.lastVideo) //#nosec G115
 	switch {
@@ -363,15 +455,15 @@ func (t *mediaTimeline) video(ts32 uint32) uint64 {
 		t.avgDeltaUS += (float64(delta) - t.avgDeltaUS) * videoDeltaEMAAlpha
 	}
 	t.lastVideo = us
-	return us
+	return us, raw
 }
 
 func (t *mediaTimeline) audio(ts32 uint32) uint64 {
-	return t.corrected(ts32)
+	return t.applyOffset(t.unwrapper.unwrap(ts32))
 }
 
-func (t *mediaTimeline) corrected(ts32 uint32) uint64 {
-	us := int64(t.unwrapper.unwrap(ts32)) - t.offset //#nosec G115
+func (t *mediaTimeline) applyOffset(raw uint64) uint64 {
+	us := int64(raw) - t.offset //#nosec G115
 	if us < 0 {
 		return 0
 	}
