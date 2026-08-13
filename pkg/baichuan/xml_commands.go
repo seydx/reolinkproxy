@@ -121,6 +121,26 @@ type xmlPtzPresetItem struct {
 	Command string `xml:"command"`
 }
 
+type xmlPtzPresetQueryBody struct {
+	XMLName   xml.Name          `xml:"body"`
+	PtzPreset *xmlPtzPresetInfo `xml:"PtzPreset"`
+}
+
+type xmlPtzPresetInfo struct {
+	ChannelID    uint8                `xml:"channelId"`
+	MaxPresetNum int                  `xml:"maxPresetNum"`
+	PresetList   xmlPtzPresetInfoList `xml:"presetList"`
+}
+
+type xmlPtzPresetInfoList struct {
+	Presets []xmlPtzPresetInfoItem `xml:"preset"`
+}
+
+type xmlPtzPresetInfoItem struct {
+	ID   int    `xml:"id"`
+	Name string `xml:"name"`
+}
+
 type xmlPtzGuardBody struct {
 	XMLName  xml.Name    `xml:"body"`
 	PtzGuard xmlPtzGuard `xml:"PtzGuard"`

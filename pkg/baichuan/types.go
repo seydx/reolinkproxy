@@ -21,6 +21,7 @@ const (
 
 	msgIDPTZControl               = 18
 	msgIDPTZControlPreset         = 19
+	msgIDPTZPresetGet             = 190
 	msgIDLogin                    = 1
 	msgIDLogout                   = 2
 	msgIDVideo                    = 3

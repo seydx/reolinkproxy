@@ -63,6 +63,17 @@ func (c *Camera) PTZPreset(ctx context.Context, presetID int) error {
 	})
 }
 
+// PTZPresets lists the PTZ positions stored on the camera.
+func (c *Camera) PTZPresets(ctx context.Context) ([]baichuan.PTZPreset, error) {
+	var presets []baichuan.PTZPreset
+	err := c.device.WithClient(ctx, func(client *baichuan.Client) error {
+		var err error
+		presets, err = client.GetPTZPresets(ctx, c.channel())
+		return err
+	})
+	return presets, err
+}
+
 // PlayQuickReply plays a stored quick-reply audio file (doorbells).
 func (c *Camera) PlayQuickReply(ctx context.Context, fileID int) error {
 	return c.device.WithClient(ctx, func(client *baichuan.Client) error {

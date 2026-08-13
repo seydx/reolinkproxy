@@ -185,6 +185,41 @@ func (c *Client) PTZPreset(ctx context.Context, channel uint8, presetID int) err
 	return err
 }
 
+// PTZPreset is one PTZ position stored on the camera. Cameras address presets
+// by ID, humans by name.
+type PTZPreset struct {
+	ID   int
+	Name string
+}
+
+// GetPTZPresets lists the PTZ positions stored on the camera. Presets renamed
+// or added in the Reolink app show up here, so callers refresh instead of
+// caching for the session.
+func (c *Client) GetPTZPresets(ctx context.Context, channel uint8) ([]PTZPreset, error) {
+	resp, err := c.execCommand(ctx, msgIDPTZPresetGet, channel, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var body xmlPtzPresetQueryBody
+	if err := xml.Unmarshal([]byte(resp.XML), &body); err != nil {
+		return nil, fmt.Errorf("parse ptz preset XML: %w", err)
+	}
+	if body.PtzPreset == nil {
+		return nil, nil
+	}
+
+	presets := make([]PTZPreset, 0, len(body.PtzPreset.PresetList.Presets))
+	for _, item := range body.PtzPreset.PresetList.Presets {
+		// an unused slot comes back without a name
+		if item.Name == "" {
+			continue
+		}
+		presets = append(presets, PTZPreset(item))
+	}
+	return presets, nil
+}
+
 // PtzGuard sets the guard position or patrol for a PTZ camera.
 func (c *Client) PtzGuard(ctx context.Context, channel uint8, enable int, cmdStr string, timeout int, setPos int) error {
 	_, err := c.execCommand(ctx, msgIDPtzGuardSet, channel, xmlPtzGuardBody{
