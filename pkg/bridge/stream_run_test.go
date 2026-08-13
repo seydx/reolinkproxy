@@ -1,12 +1,19 @@
 package bridge
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
+func catchUp(d time.Duration) *atomic.Int64 {
+	v := &atomic.Int64{}
+	v.Store(int64(d))
+	return v
+}
+
 func TestLiveEdgeKeepsASteadyStreamFlowing(t *testing.T) {
-	live := liveEdge{maxLag: defaultLiveCatchUp}
+	live := liveEdge{maxLag: catchUp(defaultLiveCatchUp)}
 	start := time.Unix(1000, 0)
 
 	for i := range 100 {
@@ -19,7 +26,7 @@ func TestLiveEdgeKeepsASteadyStreamFlowing(t *testing.T) {
 }
 
 func TestLiveEdgeSkipsBacklogUntilKeyframe(t *testing.T) {
-	live := liveEdge{maxLag: defaultLiveCatchUp}
+	live := liveEdge{maxLag: catchUp(defaultLiveCatchUp)}
 	start := time.Unix(1000, 0)
 	live.behind(0, true, start)
 
@@ -53,7 +60,7 @@ func TestLiveEdgeIgnoresACameraGapButCatchesUpOnABacklog(t *testing.T) {
 	start := time.Unix(1000, 0)
 
 	gap := testTimeline()
-	gapLive := liveEdge{maxLag: defaultLiveCatchUp}
+	gapLive := liveEdge{maxLag: catchUp(defaultLiveCatchUp)}
 	_, raw := gap.video(1_000_000)
 	gapLive.behind(raw, true, start)
 
@@ -64,7 +71,7 @@ func TestLiveEdgeIgnoresACameraGapButCatchesUpOnABacklog(t *testing.T) {
 	}
 
 	backlog := testTimeline()
-	backlogLive := liveEdge{maxLag: defaultLiveCatchUp}
+	backlogLive := liveEdge{maxLag: catchUp(defaultLiveCatchUp)}
 	_, raw = backlog.video(1_000_000)
 	backlogLive.behind(raw, true, start)
 
@@ -76,7 +83,7 @@ func TestLiveEdgeIgnoresACameraGapButCatchesUpOnABacklog(t *testing.T) {
 }
 
 func TestLiveEdgeToleratesShortStalls(t *testing.T) {
-	live := liveEdge{maxLag: defaultLiveCatchUp}
+	live := liveEdge{maxLag: catchUp(defaultLiveCatchUp)}
 	start := time.Unix(1000, 0)
 	live.behind(0, true, start)
 
@@ -150,5 +157,22 @@ func TestLiveEdgeOffPassesEverythingOn(t *testing.T) {
 
 	if live.behind(50_000, false, start.Add(time.Minute)) {
 		t.Fatal("dropped a frame although catching up is switched off")
+	}
+}
+
+func TestLiveEdgeAppliesAChangedThresholdWithoutRestart(t *testing.T) {
+	maxLag := catchUp(defaultLiveCatchUp)
+	live := liveEdge{maxLag: maxLag}
+	start := time.Unix(1000, 0)
+	live.behind(0, true, start)
+
+	burst := start.Add(10 * time.Second)
+	if !live.behind(50_000, false, burst) {
+		t.Fatal("backlog was not caught up while the threshold was set")
+	}
+
+	maxLag.Store(0)
+	if live.behind(100_000, false, burst) {
+		t.Fatal("still dropping frames after catching up was switched off")
 	}
 }

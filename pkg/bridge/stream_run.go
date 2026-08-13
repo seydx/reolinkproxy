@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
@@ -43,7 +44,7 @@ func (b *Bridge) runStream(
 	wantStream func() bool,
 	hint *AudioHint,
 	onHint func(AudioHint),
-	liveCatchUp time.Duration,
+	liveCatchUp *atomic.Int64,
 ) {
 	// per-camera logger, so stream messages name the camera they belong to
 	log := device.log
@@ -339,9 +340,10 @@ const defaultLiveCatchUp = 3 * time.Second
 type liveEdge struct {
 	log  Logger
 	name string
-	// maxLag of zero passes late video on untouched, so nothing a recorder
-	// might want is dropped
-	maxLag time.Duration
+	// maxLag is read per frame so a settings change applies without
+	// restarting the stream; zero passes late video on untouched, so nothing
+	// a recorder might want is dropped
+	maxLag *atomic.Int64
 
 	wallAnchor  time.Time
 	mediaAnchor uint64
@@ -354,7 +356,12 @@ type liveEdge struct {
 
 // behind reports whether this frame should be dropped to get back to live.
 func (l *liveEdge) behind(mediaUS uint64, keyframe bool, now time.Time) bool {
-	if l.maxLag <= 0 {
+	maxLag := time.Duration(0)
+	if l.maxLag != nil {
+		maxLag = time.Duration(l.maxLag.Load())
+	}
+	if maxLag <= 0 {
+		l.catchingUp = false
 		return false
 	}
 	if !l.anchored {
@@ -367,7 +374,7 @@ func (l *liveEdge) behind(mediaUS uint64, keyframe bool, now time.Time) bool {
 	case lag < 0:
 		// the media clock caught up with the wall clock, this is the live edge
 		l.anchor(mediaUS, now)
-	case lag > l.maxLag:
+	case lag > maxLag:
 		l.catchingUp = true
 		l.lag = lag
 	}

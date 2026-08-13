@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	gortsplib "github.com/bluenviron/gortsplib/v5"
@@ -199,6 +200,7 @@ func (b *Bridge) AddCamera(cfg CameraConfig) (*Camera, error) {
 		motion: motionState,
 		cancel: cancel,
 	}
+	cam.liveCatchUp.Store(int64(*cfg.LiveCatchUp))
 
 	// Battery cameras get a webhook so events arrive without a persistent
 	// TCP subscription keeping them awake; the TCP listener stays as backup.
@@ -356,7 +358,7 @@ func (b *Bridge) setupCameraStreams(
 			wantStream,
 			hint,
 			func(observed AudioHint) { cam.reportAudioHint(profile, observed) },
-			*cfg.LiveCatchUp,
+			&cam.liveCatchUp,
 		)
 	}
 
@@ -400,19 +402,31 @@ func idleGate(handler *rtspStreamHandler, timeout time.Duration) func() bool {
 
 // Camera is one bridged Reolink camera with its registered RTSP paths.
 type Camera struct {
-	bridge  *Bridge
-	cfg     CameraConfig
-	device  *cameraDevice
-	motion  *cameraMotionState
-	cancel  context.CancelFunc
-	paths   []string
-	streams []*streamMetadata
-	events  cameraEvents
+	bridge *Bridge
+	cfg    CameraConfig
+	device *cameraDevice
+	motion *cameraMotionState
+	cancel context.CancelFunc
+	// liveCatchUp is read per frame by the running streams, so a change
+	// applies without restarting them
+	liveCatchUp atomic.Int64
+	paths       []string
+	streams     []*streamMetadata
+	events      cameraEvents
 }
 
 // Name returns the camera name.
 func (c *Camera) Name() string {
 	return c.cfg.Name
+}
+
+// SetLiveCatchUp changes how far the picture may trail live before the stream
+// drops the backlog, zero turns catching up off. Applies to the next frame.
+func (c *Camera) SetLiveCatchUp(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	c.liveCatchUp.Store(int64(d))
 }
 
 // StreamInfo describes one exposed stream profile with the media parameters
