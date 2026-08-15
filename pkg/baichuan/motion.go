@@ -36,9 +36,11 @@ type SmartAISub struct {
 	Type  string `xml:"type"`
 }
 
-// AlarmMessage is the XML payload containing an AlarmEventList.
+// AlarmMessage is the XML payload of an alarm push. Firmwares differ in the
+// list element they wrap events in, so every list below <body> is scanned and
+// only AlarmEvent children count (reolink_aio does the same).
 type AlarmMessage struct {
-	AlarmEventList *AlarmEventList `xml:"AlarmEventList"`
+	Lists []AlarmEventList `xml:",any"`
 }
 
 // AlarmState is one decoded alarm update for a channel. Field semantics
@@ -117,23 +119,29 @@ func (c *Client) ListenForAlarms(ctx context.Context, channel uint8, callback fu
 				if msg == nil {
 					continue
 				}
-				list := pushListName(msg.XML)
-				// day/night changes share the alarm message id, so only a real
-				// alarm list proves the camera pushes events. Any channel counts:
-				// the subscription is host-wide.
-				if list == "AlarmEventList" {
+				res, err := parseAlarm(msg.XML, channel, dualLens)
+				// day/night changes share the alarm message id, so only a push
+				// carrying real events proves the camera reports alarms. Any
+				// channel counts: the subscription is host-wide.
+				if res.hasEvent {
 					c.alarmPushed.Store(true)
 				}
 
-				state, matched, err := parseAlarmState(msg.XML, channel, dualLens)
 				switch {
 				case err != nil:
 					c.debugf("alarm push could not be parsed: %v (xml=%q)", err, msg.XML)
-				case !matched:
-					c.debugf("ignored %s push for channel %d", list, channel)
+				case res.matched:
+					c.debugf("alarm push channel %d: motion=%t visitor=%t ai=%v", channel, res.state.MotionDetected, res.state.Visitor, res.state.AITypes)
+					callback(res.state)
+				case res.hasEvent:
+					// the camera reports alarms, just not for the channel this
+					// camera was adopted as; silently dropping them looks like
+					// a camera that never detects anything
+					c.foreignAlarmOnce.Do(func() {
+						c.warnf("camera pushes alarm events for channel(s) %v, this camera listens on channel %d, so its detections stay idle", res.channels, channel)
+					})
 				default:
-					c.debugf("alarm push channel %d: motion=%t visitor=%t ai=%v", channel, state.MotionDetected, state.Visitor, state.AITypes)
-					callback(state)
+					c.debugf("ignored %s push for channel %d", pushListName(msg.XML), channel)
 				}
 			}
 		}
@@ -147,67 +155,85 @@ func (c *Client) ListenForAlarms(ctx context.Context, channel uint8, callback fu
 	}, nil
 }
 
+// alarmParse is what one alarm push decoded to. hasEvent separates a real
+// alarm push from the day/night and friends that share the message id;
+// channels names who the events were for, so a push meant for nobody we know
+// can be reported instead of silently dropped.
+type alarmParse struct {
+	state    AlarmState
+	matched  bool
+	hasEvent bool
+	channels []uint8
+}
+
 func parseAlarmState(xmlText string, channel uint8, anyChannel bool) (AlarmState, bool, error) {
+	res, err := parseAlarm(xmlText, channel, anyChannel)
+	return res.state, res.matched, err
+}
+
+func parseAlarm(xmlText string, channel uint8, anyChannel bool) (alarmParse, error) {
 	if xmlText == "" {
-		return AlarmState{}, false, nil
+		return alarmParse{}, nil
 	}
 
 	var payload AlarmMessage
 	if err := xml.Unmarshal([]byte(xmlText), &payload); err != nil {
-		return AlarmState{}, false, err
+		return alarmParse{}, err
 	}
 
-	if payload.AlarmEventList == nil {
-		return AlarmState{}, false, nil
-	}
-
-	var state AlarmState
-	matched := false
-	for _, ev := range payload.AlarmEventList.AlarmEvents {
-		if !anyChannel && ev.ChannelID != channel {
-			continue
-		}
-		matched = true
-		if strings.Contains(ev.Status, "MD") {
-			state.MotionDetected = true
-		}
-		if strings.Contains(ev.Status, "visitor") {
-			state.Visitor = true
-		}
-		// PIR-style cameras report unclassified detections as AI type
-		// "other" instead of an MD status.
-		if strings.Contains(ev.AIType, "other") {
-			state.MotionDetected = true
-		}
-		for _, aiType := range parseAITypes(ev.AIType) {
-			if !slices.Contains(state.AITypes, aiType) {
-				state.AITypes = append(state.AITypes, aiType)
+	var res alarmParse
+	state := &res.state
+	for _, list := range payload.Lists {
+		for _, ev := range list.AlarmEvents {
+			res.hasEvent = true
+			if !slices.Contains(res.channels, ev.ChannelID) {
+				res.channels = append(res.channels, ev.ChannelID)
 			}
-		}
-		// zone-based smart detections (crossline, intrusion, linger) may
-		// fire without an MD status or plain AItype
-		for _, smart := range ev.SmartAI {
-			if smart.Index > 0 {
+			if !anyChannel && ev.ChannelID != channel {
+				continue
+			}
+			res.matched = true
+			if strings.Contains(ev.Status, "MD") {
 				state.MotionDetected = true
 			}
-			for _, sub := range smart.SubList {
-				types := parseAITypes(sub.Type)
-				if len(types) == 0 {
-					// a zone entry without a type is still a detection in that
-					// zone; battery doorbells report linger that way
-					state.MotionDetected = true
-					continue
+			if strings.Contains(ev.Status, "visitor") {
+				state.Visitor = true
+			}
+			// PIR-style cameras report unclassified detections as AI type
+			// "other" instead of an MD status.
+			if strings.Contains(ev.AIType, "other") {
+				state.MotionDetected = true
+			}
+			for _, aiType := range parseAITypes(ev.AIType) {
+				if !slices.Contains(state.AITypes, aiType) {
+					state.AITypes = append(state.AITypes, aiType)
 				}
-				for _, aiType := range types {
-					if !slices.Contains(state.AITypes, aiType) {
-						state.AITypes = append(state.AITypes, aiType)
+			}
+			// zone-based smart detections (crossline, intrusion, linger) may
+			// fire without an MD status or plain AItype
+			for _, smart := range ev.SmartAI {
+				if smart.Index > 0 {
+					state.MotionDetected = true
+				}
+				for _, sub := range smart.SubList {
+					types := parseAITypes(sub.Type)
+					if len(types) == 0 {
+						// a zone entry without a type is still a detection in that
+						// zone; battery doorbells report linger that way
+						state.MotionDetected = true
+						continue
+					}
+					for _, aiType := range types {
+						if !slices.Contains(state.AITypes, aiType) {
+							state.AITypes = append(state.AITypes, aiType)
+						}
 					}
 				}
 			}
 		}
 	}
 
-	return state, matched, nil
+	return res, nil
 }
 
 // pushListName returns the list element below <body> so an ignored push can be

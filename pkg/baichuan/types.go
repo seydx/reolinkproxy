@@ -123,6 +123,10 @@ type Config struct {
 	// Debugf, when set, receives protocol-level diagnostics. Callers route it
 	// to the camera's logger so the output stays attributable.
 	Debugf func(format string, args ...any)
+	// Warnf, when set, receives the few protocol findings a user has to see
+	// even without debug logging, e.g. events arriving for a channel nobody
+	// listens on. Callers route it to their camera logger.
+	Warnf func(format string, args ...any)
 }
 
 func (c Config) normalized() Config {

@@ -256,3 +256,76 @@ func TestPushListName(t *testing.T) {
 		})
 	}
 }
+
+// Firmwares differ in the list element they wrap alarm events in. What counts
+// is the AlarmEvent itself, not its parent, otherwise a camera reports
+// detections that never reach the user.
+func TestParseAlarmStateAcceptsAnyEventListName(t *testing.T) {
+	xmlText := `<?xml version="1.0" encoding="UTF-8" ?>
+<body>
+<AlarmEventListV2>
+<AlarmEvent>
+<channelId>0</channelId>
+<status>MD</status>
+<AItype>people</AItype>
+</AlarmEvent>
+</AlarmEventListV2>
+</body>`
+
+	state, matched, err := parseAlarmState(xmlText, 0, false)
+	if err != nil {
+		t.Fatalf("parseAlarmState() error: %v", err)
+	}
+	if !matched {
+		t.Fatal("event in an unknown list was dropped")
+	}
+	if !state.MotionDetected || !slices.Contains(state.AITypes, "people") {
+		t.Fatalf("state = %+v, want motion with people", state)
+	}
+}
+
+func TestParseAlarmReportsEventsForOtherChannels(t *testing.T) {
+	xmlText := `<?xml version="1.0" encoding="UTF-8" ?>
+<body>
+<AlarmEventList>
+<AlarmEvent>
+<channelId>3</channelId>
+<status>MD</status>
+</AlarmEvent>
+</AlarmEventList>
+</body>`
+
+	res, err := parseAlarm(xmlText, 0, false)
+	if err != nil {
+		t.Fatalf("parseAlarm() error: %v", err)
+	}
+	if res.matched {
+		t.Fatal("an event for another channel must not match")
+	}
+	if !res.hasEvent {
+		t.Fatal("hasEvent must report that the camera pushes alarms at all")
+	}
+	if !slices.Equal(res.channels, []uint8{3}) {
+		t.Fatalf("channels = %v, want [3]", res.channels)
+	}
+}
+
+func TestParseAlarmIgnoresDayNightPush(t *testing.T) {
+	xmlText := `<?xml version="1.0" encoding="UTF-8" ?>
+<body>
+<DayNightEventList>
+<DayNightEvent>
+<channelId>0</channelId>
+<status>day</status>
+</DayNightEvent>
+</DayNightEventList>
+</body>`
+
+	res, err := parseAlarm(xmlText, 0, false)
+	if err != nil {
+		t.Fatalf("parseAlarm() error: %v", err)
+	}
+	if res.hasEvent || res.matched {
+		t.Fatalf("day/night push counted as an alarm: %+v", res)
+	}
+}

@@ -71,6 +71,7 @@ func newCameraDevice(cameraName string, cfg baichuan.Config, reconnectBackoff ti
 	}
 	if log != nil {
 		cfg.Debugf = log.Debugf
+		cfg.Warnf = log.Warnf
 	}
 	return &cameraDevice{
 		cameraName:       cameraName,

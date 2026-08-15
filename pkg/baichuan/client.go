@@ -53,10 +53,22 @@ type Client struct {
 
 	keepAliveOnce sync.Once
 
+	// foreignAlarmOnce keeps the "events are for another channel" warning to
+	// one line per connection
+	foreignAlarmOnce sync.Once
+
 	// alarmPushed latches once the camera has pushed an alarm event on this
 	// connection. Firmwares that accept the subscription without ever pushing
 	// need it re-sent, so the state has to be per connection.
 	alarmPushed atomic.Bool
+}
+
+func (c *Client) warnf(format string, args ...any) {
+	if c.cfg.Warnf != nil {
+		c.cfg.Warnf(format, args...)
+		return
+	}
+	c.debugf(format, args...)
 }
 
 func (c *Client) debugf(format string, args ...any) {
