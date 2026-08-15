@@ -498,10 +498,11 @@ func (m *cameraDevice) setupAlarmListener(ctx context.Context, client *baichuan.
 		return cancelAlarms, true
 	}
 
+	// Only a camera that lacks the ability outright is hopeless. A rejected
+	// subscription is retried by ListenForAlarms and the renewal ticker, so it
+	// must never disable events for the rest of the session.
 	var missingAbility *baichuan.MissingAbilityError
-	var statusErr *baichuan.StatusError
-	if (errors.As(err, &missingAbility) && missingAbility.Name == "motion") ||
-		(errors.As(err, &statusErr) && statusErr.MsgID == 31 && statusErr.Code == 400) {
+	if errors.As(err, &missingAbility) && missingAbility.Name == "motion" {
 		m.log.Warnf("events: alarm listener unsupported for %s: %v", m.cameraName, err)
 		*motionUnsupported = true
 		if handlers.motionUnsupported != nil {

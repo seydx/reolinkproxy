@@ -329,3 +329,17 @@ func TestParseAlarmIgnoresDayNightPush(t *testing.T) {
 		t.Fatalf("day/night push counted as an alarm: %+v", res)
 	}
 }
+
+// A busy camera answers "not now", a camera without the command answers
+// something else. Only the first deserves a retry.
+func TestIsBusyStatus(t *testing.T) {
+	if !isBusyStatus(&StatusError{MsgID: 31, Code: 400}) {
+		t.Fatal("status 400 must count as busy")
+	}
+	if isBusyStatus(&StatusError{MsgID: 31, Code: 401}) {
+		t.Fatal("status 401 must not count as busy")
+	}
+	if isBusyStatus(nil) {
+		t.Fatal("no error must not count as busy")
+	}
+}

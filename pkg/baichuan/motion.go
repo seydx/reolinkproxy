@@ -3,9 +3,11 @@ package baichuan
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 )
 
 // AlarmEventList contains a list of alarm events from the camera.
@@ -62,16 +64,48 @@ func (s AlarmState) Active() bool {
 	return s.MotionDetected || len(s.AITypes) > 0
 }
 
+// alarmSubscribeRetries covers a camera that is merely busy: right after
+// connecting it also handles the login, two preview starts and the talk setup,
+// and answers the subscription with a 400 until it has caught up. A battery
+// camera needs the same grace to wake.
+const (
+	alarmSubscribeRetries = 3
+	alarmSubscribeBackoff = 1500 * time.Millisecond
+)
+
 // RefreshAlarmSubscription (re-)requests the camera's event push. The
 // subscription is host-wide, so it is addressed to the push channel rather than
 // the camera's own channel; NVRs reject it otherwise and never push anything.
 func (c *Client) RefreshAlarmSubscription(ctx context.Context) error {
-	_, err := c.sendRequest(ctx, request{
-		MsgID:     msgIDMotionRequest,
-		ChannelID: channelIDPush,
-		Class:     classModernWithOffset,
-	})
+	var err error
+	for attempt := range alarmSubscribeRetries {
+		_, err = c.sendRequest(ctx, request{
+			MsgID:     msgIDMotionRequest,
+			ChannelID: channelIDPush,
+			Class:     classModernWithOffset,
+		})
+		if err == nil || !isBusyStatus(err) {
+			return err
+		}
+		if attempt == alarmSubscribeRetries-1 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-c.closed:
+			return err
+		case <-time.After(alarmSubscribeBackoff):
+		}
+	}
 	return err
+}
+
+// isBusyStatus reports the "not now" answer a camera gives while it is still
+// occupied, as opposed to a command it will never accept.
+func isBusyStatus(err error) bool {
+	var statusErr *StatusError
+	return errors.As(err, &statusErr) && statusErr.Code == 400
 }
 
 // AlarmPushSeen reports whether the camera has pushed an alarm event on this
@@ -92,8 +126,14 @@ func (c *Client) ListenForAlarms(ctx context.Context, channel uint8, callback fu
 		return nil, err
 	}
 
+	// A camera that stays busy is not a camera without events: keep the
+	// receiver and let the caller's renewal retry the subscription, otherwise
+	// one bad moment at startup silences detections until the next restart.
 	if err := c.RefreshAlarmSubscription(ctx); err != nil {
-		return nil, err
+		if !isBusyStatus(err) {
+			return nil, err
+		}
+		c.warnf("camera did not accept the event subscription yet (%v), retrying in the background", err)
 	}
 
 	// dual-lens cameras may alarm on the telephoto stream channel, both
