@@ -33,10 +33,6 @@ type cameraDevice struct {
 	// subscription (unsupported firmware) so it is not retried on every reconnect.
 	webhookFailed bool
 
-	// alarmSilenceOnce keeps the "camera never pushes events" warning to a
-	// single line instead of one per session rebuild.
-	alarmSilenceOnce sync.Once
-
 	mu     sync.Mutex
 	client *baichuan.Client
 	// dualLens caches the last login's dual-lens flag so webhook pushes can
@@ -420,20 +416,17 @@ func (m *cameraDevice) WatchEvents(ctx context.Context, channel uint8, handlers 
 }
 
 // runEventSession keeps the camera-side subscription alive until the
-// connection drops. A camera that has not pushed anything is asked again every
-// alarmRetryInterval, because some firmwares acknowledge the subscription and
-// then stay silent; once pushes flow, the slower renewal is enough.
+// connection drops. A camera that has not pushed anything yet is asked again
+// quickly for a while, because some firmwares need a second ask; after that
+// the slow renewal is enough. Silence itself is no reason to keep asking: a
+// camera watching a quiet scene has nothing to report.
 func (m *cameraDevice) runEventSession(ctx context.Context, client *baichuan.Client, channel uint8, handlers eventHandlers, motionUnsupported bool) {
 	const (
-		alarmRetryInterval  = 30 * time.Second
-		alarmRenewInterval  = 5 * time.Minute
-		batteryPollInterval = 5 * time.Minute
-		// A working camera answers the subscription with its current state right
-		// away, so silence over this many retries means events never started.
-		alarmSilenceLimit = 4
+		alarmRetryInterval   = 30 * time.Second
+		alarmFastRetryWindow = 5 * time.Minute
+		alarmRenewInterval   = 5 * time.Minute
+		batteryPollInterval  = 5 * time.Minute
 	)
-
-	silentRetries := 0
 
 	// A battery camera must not be poked while it sleeps; its events come over
 	// the webhook anyway.
@@ -447,7 +440,8 @@ func (m *cameraDevice) runEventSession(ctx context.Context, client *baichuan.Cli
 	battery := time.NewTicker(batteryPollInterval)
 	defer battery.Stop()
 
-	lastRenew := time.Now()
+	sessionStart := time.Now()
+	lastRenew := sessionStart
 
 	for {
 		select {
@@ -462,21 +456,12 @@ func (m *cameraDevice) runEventSession(ctx context.Context, client *baichuan.Cli
 		case <-battery.C:
 			m.setupWebhookAndBatteryPoll(ctx, client, channel, handlers)
 		case now := <-renew:
-			pushing := client.AlarmPushSeen()
-			if pushing && now.Sub(lastRenew) < alarmRenewInterval {
+			fastRetry := !client.AlarmPushSeen() && now.Sub(sessionStart) < alarmFastRetryWindow
+			if !fastRetry && now.Sub(lastRenew) < alarmRenewInterval {
 				continue
 			}
 			lastRenew = now
 
-			if !pushing {
-				silentRetries++
-				if silentRetries == alarmSilenceLimit {
-					m.alarmSilenceOnce.Do(func() {
-						m.log.Warnf("events: camera %s accepted the event subscription but has not pushed anything, motion and AI detections stay idle", m.cameraName)
-					})
-				}
-				m.log.Debugf("events: no alarm push from %s yet, re-sending the subscription", m.cameraName)
-			}
 			if err := client.RefreshAlarmSubscription(ctx); err != nil {
 				m.log.Debugf("events: renewing the subscription failed for %s: %v", m.cameraName, err)
 			}

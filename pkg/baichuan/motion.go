@@ -129,11 +129,14 @@ func (c *Client) ListenForAlarms(ctx context.Context, channel uint8, callback fu
 	// A camera that stays busy is not a camera without events: keep the
 	// receiver and let the caller's renewal retry the subscription, otherwise
 	// one bad moment at startup silences detections until the next restart.
+	// Some models answer 400 forever and push anyway, so the reply says
+	// nothing worth alarming the user about; only pushes failing to arrive
+	// does, and that is reported once the renewals stay unanswered.
 	if err := c.RefreshAlarmSubscription(ctx); err != nil {
 		if !isBusyStatus(err) {
 			return nil, err
 		}
-		c.warnf("camera did not accept the event subscription yet (%v), retrying in the background", err)
+		c.debugf("camera did not accept the event subscription yet (%v), retrying in the background", err)
 	}
 
 	// dual-lens cameras may alarm on the telephoto stream channel, both
