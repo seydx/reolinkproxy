@@ -2,6 +2,7 @@ package baichuan
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -112,6 +113,10 @@ const (
 	StreamExtern Stream = "externStream"
 )
 
+// ErrIdle is the terminal error of a connection that CloseWhenIdle dropped
+// because nothing used it, not because anything went wrong.
+var ErrIdle = errors.New("connection closed while idle")
+
 // Config contains connection settings for a Baichuan client.
 type Config struct {
 	Host     string
@@ -127,6 +132,11 @@ type Config struct {
 	// even without debug logging, e.g. events arriving for a channel nobody
 	// listens on. Callers route it to their camera logger.
 	Warnf func(format string, args ...any)
+	// LowPower marks a peer that must not be kept awake: a battery camera
+	// only sleeps once nothing holds its radio, so Login starts no keepalive.
+	// The caller decides what happens instead, see StartKeepAlive and
+	// CloseWhenIdle.
+	LowPower bool
 }
 
 func (c Config) normalized() Config {

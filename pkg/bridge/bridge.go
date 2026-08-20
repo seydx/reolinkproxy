@@ -175,6 +175,7 @@ func (b *Bridge) AddCamera(cfg CameraConfig) (*Camera, error) {
 		Username: cfg.Username,
 		Password: cfg.Password,
 		Timeout:  cfg.Timeout,
+		LowPower: cfg.BatteryCamera,
 	}, reconnectBackoff, camLog)
 
 	talkPath := talkPathForCamera(cfg.RTSPPath)
@@ -229,6 +230,7 @@ func (b *Bridge) AddCamera(cfg CameraConfig) (*Camera, error) {
 		},
 		pollBattery: cfg.BatteryCamera,
 		webhookURL:  webhookURL,
+		lowPower:    cfg.BatteryCamera && webhookURL != "",
 	})
 
 	metas, streamPaths := b.setupCameraStreams(ctx, cam, cfg, device, talkPublisher, motionState)

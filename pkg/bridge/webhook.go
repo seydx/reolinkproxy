@@ -148,6 +148,10 @@ func (c *Camera) handleWebhookPush(body []byte) {
 			if sleeping, ok := baichuan.ParseSleepStates(push.XML)[int(channel)]; ok {
 				c.handleSleep(sleeping)
 			}
+		case 291:
+			if on, ok := baichuan.ParseFloodlightStates(push.XML)[int(channel)]; ok {
+				c.handleFloodlight(on)
+			}
 		default:
 			c.bridge.log.Debugf("camera %s webhook: unhandled cmd %d", c.cfg.Name, push.Cmd)
 		}

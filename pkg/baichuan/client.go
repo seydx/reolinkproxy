@@ -48,10 +48,13 @@ type Client struct {
 	closeErr  closeState
 	wg        sync.WaitGroup
 
-	// lastRead is when a message last came off the wire, in unix nanos
+	// lastRead / lastSend are when a message last came off / went onto the
+	// wire, in unix nanos
 	lastRead atomic.Int64
+	lastSend atomic.Int64
 
 	keepAliveOnce sync.Once
+	idleCloseOnce sync.Once
 
 	// foreignAlarmOnce keeps the "events are for another channel" warning to
 	// one line per connection
@@ -275,12 +278,56 @@ func (c *Client) Login(ctx context.Context) error {
 
 	c.loggedIn = true
 
+	if !c.cfg.LowPower {
+		c.StartKeepAlive()
+	}
+
+	return nil
+}
+
+// StartKeepAlive begins pinging the camera so a dead link is noticed. Login
+// does this on its own; a LowPower peer starts silent and only gets the pings
+// when the caller has no other way to keep the connection honest.
+func (c *Client) StartKeepAlive() {
 	c.keepAliveOnce.Do(func() {
 		c.wg.Add(1)
 		go c.keepAliveLoop()
 	})
+}
 
-	return nil
+// CloseWhenIdle closes the connection once nothing has been sent or received
+// for the given span, so a battery camera can go back to sleep. Traffic in
+// either direction counts, which keeps a running preview alive.
+func (c *Client) CloseWhenIdle(after time.Duration) {
+	if after <= 0 {
+		return
+	}
+	c.idleCloseOnce.Do(func() {
+		c.wg.Add(1)
+		go c.idleCloseLoop(after)
+	})
+}
+
+func (c *Client) idleCloseLoop(after time.Duration) {
+	defer c.wg.Done()
+
+	ticker := time.NewTicker(after / 2)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			last := max(c.lastRead.Load(), c.lastSend.Load())
+			if time.Since(time.Unix(0, last)) < after {
+				continue
+			}
+			c.debugf("closing the connection to let the camera sleep")
+			c.shutdown(ErrIdle)
+			return
+		case <-c.closed:
+			return
+		}
+	}
 }
 
 func (c *Client) keepAliveLoop() {
@@ -288,7 +335,7 @@ func (c *Client) keepAliveLoop() {
 
 	const pingTimeout = 4 * time.Second
 
-	interval := 5 * time.Second
+	interval := 30 * time.Second
 	if c.isUDP {
 		interval = 500 * time.Millisecond
 	}
@@ -572,6 +619,7 @@ func (c *Client) writeRequest(req request) error {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 	_, err := c.transport.Write(payload)
+	c.lastSend.Store(time.Now().UnixNano())
 	return err
 }
 

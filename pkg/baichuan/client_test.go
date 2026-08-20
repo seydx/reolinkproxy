@@ -1,7 +1,11 @@
 package baichuan
 
 import (
+	"errors"
+	"io"
+	"sync"
 	"testing"
+	"time"
 )
 
 func testDispatchClient() *Client {
@@ -42,5 +46,65 @@ func TestDispatchCountsDropsPerSubscription(t *testing.T) {
 	}
 	if len(other.ch) != 1 {
 		t.Fatalf("fresh subscription holds %d messages, want 1", len(other.ch))
+	}
+}
+
+type nopTransport struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (t *nopTransport) Read(_ []byte) (int, error) {
+	<-t.closed
+	return 0, io.EOF
+}
+
+func (t *nopTransport) Write(p []byte) (int, error) { return len(p), nil }
+
+func (t *nopTransport) Close() error {
+	t.once.Do(func() { close(t.closed) })
+	return nil
+}
+
+func testIdleClient() *Client {
+	c := testDispatchClient()
+	c.transport = &nopTransport{closed: make(chan struct{})}
+	c.lastRead.Store(time.Now().UnixNano())
+	c.lastSend.Store(time.Now().UnixNano())
+	return c
+}
+
+func TestCloseWhenIdleDropsAQuietConnection(t *testing.T) {
+	t.Parallel()
+
+	c := testIdleClient()
+	c.CloseWhenIdle(60 * time.Millisecond)
+
+	select {
+	case <-c.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("an unused connection was not closed")
+	}
+	if !errors.Is(c.Err(), ErrIdle) {
+		t.Fatalf("Err() = %v, want ErrIdle", c.Err())
+	}
+}
+
+func TestCloseWhenIdleKeepsAConnectionCarryingTraffic(t *testing.T) {
+	t.Parallel()
+
+	c := testIdleClient()
+	c.CloseWhenIdle(60 * time.Millisecond)
+
+	// a running preview only reads, so incoming media alone has to count
+	for range 8 {
+		time.Sleep(20 * time.Millisecond)
+		c.lastRead.Store(time.Now().UnixNano())
+	}
+
+	select {
+	case <-c.Done():
+		t.Fatal("a connection carrying traffic was closed")
+	default:
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/shareed2k/reolinkproxy/pkg/baichuan"
@@ -31,7 +32,11 @@ type cameraDevice struct {
 
 	// webhookFailed latches after the camera rejected the webhook
 	// subscription (unsupported firmware) so it is not retried on every reconnect.
-	webhookFailed bool
+	webhookFailed atomic.Bool
+
+	// onConnect, when set, prepares every freshly logged-in client the same
+	// way the first one was.
+	onConnect func(*baichuan.Client)
 
 	mu     sync.Mutex
 	client *baichuan.Client
@@ -100,7 +105,17 @@ func (m *cameraDevice) Ensure(ctx context.Context) (*baichuan.Client, error) {
 	m.client = client
 	m.dualLens = client.LoginDeviceInfo().IsDualLens()
 	m.notifyState(true)
+	if m.onConnect != nil {
+		go m.onConnect(client)
+	}
 	return client, nil
+}
+
+// setOnConnect installs the preparation every later connection needs.
+func (m *cameraDevice) setOnConnect(fn func(*baichuan.Client)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onConnect = fn
 }
 
 func (m *cameraDevice) DualLens() bool {
@@ -151,9 +166,14 @@ func (m *cameraDevice) closeLocked(reason string) {
 	if reason != "" {
 		m.log.Infof("camera %s reconnecting: %s", m.cameraName, reason)
 	}
+	// a connection we dropped on purpose to let the camera sleep never was a
+	// loss, so it must not surface as a camera going offline
+	idle := errors.Is(m.client.Err(), baichuan.ErrIdle)
 	_ = m.client.Close()
 	m.client = nil
-	m.notifyState(false)
+	if !idle {
+		m.notifyState(false)
+	}
 }
 
 // notifyState hands a connection state to the callback without blocking the
@@ -348,71 +368,159 @@ type eventHandlers struct {
 	// webhookURL, when set, is registered with the camera on every
 	// (re)connect so it pushes events itself (battery cameras).
 	webhookURL string
+	// lowPower keeps the camera asleep: no persistent event session, no
+	// keepalive, and the connection is dropped as soon as it sits unused.
+	lowPower bool
 }
 
-// WatchEvents establishes a persistent event listener session (motion/AI
-// alarms + battery pushes) and reconnects when the connection drops. The
-// listeners live as long as the connection does; only the camera-side
-// subscription is renewed, so no push falls into a teardown gap.
+// lowPowerIdle is how long a battery camera's connection may sit unused before
+// it is closed. Everything below the wake-up cost of a reconnect is fine;
+// reolink_aio settled on the same 5s.
+const lowPowerIdle = 5 * time.Second
+
+// WatchEvents starts event delivery for the camera: a battery camera is set
+// up to push on its own, every other camera gets a listener session that lives
+// as long as the connection and reconnects when it drops. Only the camera-side
+// subscription is renewed there, so no push falls into a teardown gap.
 func (m *cameraDevice) WatchEvents(ctx context.Context, channel uint8, handlers eventHandlers) {
-	go func() {
-		motionUnsupported := false
+	if handlers.lowPower {
+		go m.watchLowPower(ctx, channel, handlers)
+		return
+	}
+	go m.watchEventsLoop(ctx, channel, handlers)
+}
 
-		for {
-			if ctx.Err() != nil {
-				return
-			}
+// watchLowPower prepares a battery camera to push its events over the webhook
+// and then lets the connection go. An open connection is what keeps the
+// camera's radio out of deep sleep, pinged or not, and costs a doorbell its
+// charge within a day. Later connections re-register the webhook through
+// onConnect, so a camera that rebooted gets it back the next time anything
+// talks to it.
+func (m *cameraDevice) watchLowPower(ctx context.Context, channel uint8, handlers eventHandlers) {
+	warned := false
 
-			client, err := m.Ensure(ctx)
-			if err != nil {
-				m.log.Warnf("events: camera connect error for %s: %v. retrying in %v...", m.cameraName, err, m.reconnectBackoff)
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(m.reconnectBackoff):
-				}
-				continue
-			}
-
-			cancelAlarms, alarmsOK := m.setupAlarmListener(ctx, client, channel, handlers, &motionUnsupported)
-			if !alarmsOK {
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(m.reconnectBackoff):
-				}
-				continue
-			}
-
-			cancelBattery := func() {}
-			if handlers.battery != nil {
-				cancelBattery = client.ListenForBattery(ctx, channel, handlers.battery)
-			}
-
-			cancelSleep := func() {}
-			if handlers.sleep != nil {
-				cancelSleep = client.ListenForSleep(ctx, channel, handlers.sleep)
-			}
-
-			cancelFloodlight := func() {}
-			if handlers.floodlight != nil {
-				cancelFloodlight = client.ListenForFloodlight(ctx, channel, handlers.floodlight)
-			}
-
-			m.setupWebhookAndBatteryPoll(ctx, client, channel, handlers)
-
-			if motionUnsupported && handlers.battery == nil {
-				return
-			}
-
-			m.runEventSession(ctx, client, channel, handlers, motionUnsupported)
-
-			cancelAlarms()
-			cancelBattery()
-			cancelSleep()
-			cancelFloodlight()
+	for {
+		if ctx.Err() != nil {
+			return
 		}
-	}()
+
+		client, err := m.Ensure(ctx)
+		if err != nil {
+			// A sleeping camera refuses the connection, which is normal here:
+			// say it once, then keep trying quietly.
+			if !warned {
+				warned = true
+				m.log.Warnf("events: camera connect error for %s: %v. retrying in %v...", m.cameraName, err, m.reconnectBackoff)
+			} else {
+				m.log.Debugf("events: camera connect error for %s: %v", m.cameraName, err)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(m.reconnectBackoff):
+			}
+			continue
+		}
+
+		if m.wiredPower(ctx, client, channel) {
+			// plugged in, so there is nothing to save: a connection gives
+			// faster and more complete events than the webhook does
+			m.log.Debugf("events: camera %s runs on a permanent supply, keeping the connection", m.cameraName)
+			m.watchEventsLoop(ctx, channel, handlers)
+			return
+		}
+
+		err = m.setupWebhookAndBatteryPoll(ctx, client, channel, handlers)
+
+		if m.webhookFailed.Load() {
+			// Without webhook support the camera can only report over a
+			// connection, so it has to be kept open. That is the firmware's
+			// price, not a choice we can make for the user.
+			m.log.Warnf("events: camera %s cannot push events on its own, keeping the connection open costs battery life", m.cameraName)
+			m.watchEventsLoop(ctx, channel, handlers)
+			return
+		}
+		if err != nil {
+			// letting the connection go now would leave the camera with no
+			// way to reach us at all
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(m.reconnectBackoff):
+			}
+			continue
+		}
+
+		m.setOnConnect(func(next *baichuan.Client) {
+			next.CloseWhenIdle(lowPowerIdle)
+			_ = m.setupWebhookAndBatteryPoll(ctx, next, channel, handlers)
+		})
+		client.CloseWhenIdle(lowPowerIdle)
+		return
+	}
+}
+
+func (m *cameraDevice) watchEventsLoop(ctx context.Context, channel uint8, handlers eventHandlers) {
+	motionUnsupported := false
+
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+
+		client, err := m.Ensure(ctx)
+		if err != nil {
+			m.log.Warnf("events: camera connect error for %s: %v. retrying in %v...", m.cameraName, err, m.reconnectBackoff)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(m.reconnectBackoff):
+			}
+			continue
+		}
+
+		// a session that has to stay open needs the pings to notice a dead
+		// link, even on a camera Login left silent
+		client.StartKeepAlive()
+
+		cancelAlarms, alarmsOK := m.setupAlarmListener(ctx, client, channel, handlers, &motionUnsupported)
+		if !alarmsOK {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(m.reconnectBackoff):
+			}
+			continue
+		}
+
+		cancelBattery := func() {}
+		if handlers.battery != nil {
+			cancelBattery = client.ListenForBattery(ctx, channel, handlers.battery)
+		}
+
+		cancelSleep := func() {}
+		if handlers.sleep != nil {
+			cancelSleep = client.ListenForSleep(ctx, channel, handlers.sleep)
+		}
+
+		cancelFloodlight := func() {}
+		if handlers.floodlight != nil {
+			cancelFloodlight = client.ListenForFloodlight(ctx, channel, handlers.floodlight)
+		}
+
+		_ = m.setupWebhookAndBatteryPoll(ctx, client, channel, handlers)
+
+		if motionUnsupported && handlers.battery == nil {
+			return
+		}
+
+		m.runEventSession(ctx, client, handlers, motionUnsupported)
+
+		cancelAlarms()
+		cancelBattery()
+		cancelSleep()
+		cancelFloodlight()
+	}
 }
 
 // runEventSession keeps the camera-side subscription alive until the
@@ -420,12 +528,11 @@ func (m *cameraDevice) WatchEvents(ctx context.Context, channel uint8, handlers 
 // quickly for a while, because some firmwares need a second ask; after that
 // the slow renewal is enough. Silence itself is no reason to keep asking: a
 // camera watching a quiet scene has nothing to report.
-func (m *cameraDevice) runEventSession(ctx context.Context, client *baichuan.Client, channel uint8, handlers eventHandlers, motionUnsupported bool) {
+func (m *cameraDevice) runEventSession(ctx context.Context, client *baichuan.Client, handlers eventHandlers, motionUnsupported bool) {
 	const (
 		alarmRetryInterval   = 30 * time.Second
 		alarmFastRetryWindow = 5 * time.Minute
 		alarmRenewInterval   = 5 * time.Minute
-		batteryPollInterval  = 5 * time.Minute
 	)
 
 	// A battery camera must not be poked while it sleeps; its events come over
@@ -436,9 +543,6 @@ func (m *cameraDevice) runEventSession(ctx context.Context, client *baichuan.Cli
 		defer ticker.Stop()
 		renew = ticker.C
 	}
-
-	battery := time.NewTicker(batteryPollInterval)
-	defer battery.Stop()
 
 	sessionStart := time.Now()
 	lastRenew := sessionStart
@@ -453,8 +557,6 @@ func (m *cameraDevice) runEventSession(ctx context.Context, client *baichuan.Cli
 				m.log.Warnf("events: listener disconnected for %s: %v. reconnecting...", m.cameraName, err)
 			}
 			return
-		case <-battery.C:
-			m.setupWebhookAndBatteryPoll(ctx, client, channel, handlers)
 		case now := <-renew:
 			fastRetry := !client.AlarmPushSeen() && now.Sub(sessionStart) < alarmFastRetryWindow
 			if !fastRetry && now.Sub(lastRenew) < alarmRenewInterval {
@@ -501,17 +603,35 @@ func (m *cameraDevice) setupAlarmListener(ctx context.Context, client *baichuan.
 	return nil, false
 }
 
+// wiredPower asks the camera whether it currently runs off a permanent supply.
+// Battery doorbells are often wired to the bell transformer, and letting one
+// of those sleep costs events for nothing. Firmwares without the field, and a
+// camera that does not answer, count as running on battery.
+func (m *cameraDevice) wiredPower(ctx context.Context, client *baichuan.Client, channel uint8) bool {
+	askCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	info, err := client.GetBattery(askCtx, channel)
+	if err != nil || info == nil {
+		m.log.Debugf("events: camera %s did not report its power supply: %v", m.cameraName, err)
+		return false
+	}
+	return info.WiredPower()
+}
+
 // setupWebhookAndBatteryPoll registers the event webhook (battery cameras)
-// and kicks off the initial battery query for the current connection.
-func (m *cameraDevice) setupWebhookAndBatteryPoll(ctx context.Context, client *baichuan.Client, channel uint8, handlers eventHandlers) {
-	if handlers.webhookURL != "" && !m.webhookFailed {
+// and kicks off the initial battery query for the current connection. The
+// error says whether the camera pushes events on its own now; webhookFailed
+// separates a firmware that never will from a try worth repeating.
+func (m *cameraDevice) setupWebhookAndBatteryPoll(ctx context.Context, client *baichuan.Client, channel uint8, handlers eventHandlers) error {
+	var webhookErr error
+	if handlers.webhookURL != "" && !m.webhookFailed.Load() {
 		if err := m.subscribeWebhook(ctx, client, handlers.webhookURL); err != nil {
-			// Unsupported firmware answers with a status error — log once and
-			// stop retrying; events keep flowing over TCP.
+			webhookErr = err
 			var statusErr *baichuan.StatusError
 			if errors.As(err, &statusErr) {
-				m.log.Warnf("events: camera %s does not support webhooks, battery events rely on the TCP listener: %v", m.cameraName, err)
-				m.webhookFailed = true
+				m.log.Warnf("events: camera %s does not support webhooks: %v", m.cameraName, err)
+				m.webhookFailed.Store(true)
 			} else {
 				m.log.Warnf("events: webhook subscription failed for %s: %v", m.cameraName, err)
 			}
@@ -527,6 +647,8 @@ func (m *cameraDevice) setupWebhookAndBatteryPoll(ctx context.Context, client *b
 			}
 		}()
 	}
+
+	return webhookErr
 }
 
 // subscribeWebhook enables the camera's event push webhook, verifying the

@@ -193,6 +193,15 @@ type BatteryInfo struct {
 	BatteryPercent int    `xml:"batteryPercent"`
 	LowPower       int    `xml:"lowPower"`
 	BatteryVersion int    `xml:"batteryVersion"`
+	// PowerSupplyStatus is "normal" while the camera runs off a permanent
+	// supply. Firmwares that predate the field leave it empty.
+	PowerSupplyStatus string `xml:"powerSupplyStatus"`
+}
+
+// WiredPower reports a battery camera that is currently plugged in, so it has
+// no reason to sleep and can keep a connection like a mains camera.
+func (b BatteryInfo) WiredPower() bool {
+	return b.PowerSupplyStatus == "normal"
 }
 
 // BatteryMessage is the XML payload for battery information.
