@@ -38,6 +38,12 @@ type cameraDevice struct {
 	// way the first one was.
 	onConnect func(*baichuan.Client)
 
+	// pushSeen closes once the camera has reached the webhook address, which
+	// proves the whole path end to end. Silence proves nothing, so this is the
+	// only signal that may decide to drop the connection.
+	pushSeen chan struct{}
+	pushOnce sync.Once
+
 	mu     sync.Mutex
 	client *baichuan.Client
 	// dualLens caches the last login's dual-lens flag so webhook pushes can
@@ -79,6 +85,31 @@ func newCameraDevice(cameraName string, cfg baichuan.Config, reconnectBackoff ti
 		cfg:              cfg,
 		reconnectBackoff: reconnectBackoff,
 		log:              log,
+		pushSeen:         make(chan struct{}),
+	}
+}
+
+// notePush records that a webhook push arrived from this camera.
+func (m *cameraDevice) notePush() {
+	m.pushOnce.Do(func() {
+		close(m.pushSeen)
+	})
+}
+
+// awaitPush waits for the camera to reach the webhook address. The camera
+// sends a test push right after the subscription, so the wait covers a round
+// trip, not a guess about how long events take to happen.
+func (m *cameraDevice) awaitPush(ctx context.Context, wait time.Duration) bool {
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+
+	select {
+	case <-m.pushSeen:
+		return true
+	case <-timer.C:
+		return false
+	case <-ctx.Done():
+		return false
 	}
 }
 
@@ -365,6 +396,9 @@ type eventHandlers struct {
 	// pollBattery queries the battery state once per (re)connect so the
 	// consumer has a value before the first spontaneous push.
 	pollBattery bool
+	// letSleep marks a camera that has to be left alone between events, so
+	// nothing renews a subscription it did not ask for.
+	letSleep bool
 	// webhookURL, when set, is registered with the camera on every
 	// (re)connect so it pushes events itself (battery cameras).
 	webhookURL string
@@ -373,10 +407,15 @@ type eventHandlers struct {
 	lowPower bool
 }
 
-// lowPowerIdle is how long a battery camera's connection may sit unused before
-// it is closed. Everything below the wake-up cost of a reconnect is fine;
-// reolink_aio settled on the same 5s.
-const lowPowerIdle = 5 * time.Second
+const (
+	// lowPowerIdle is how long a battery camera's connection may sit unused
+	// before it is closed. Everything below the wake-up cost of a reconnect is
+	// fine; reolink_aio settled on the same 5s.
+	lowPowerIdle = 5 * time.Second
+	// webhookConfirmWait covers the camera's test push, which it sends right
+	// after the subscription.
+	webhookConfirmWait = 30 * time.Second
+)
 
 // WatchEvents starts event delivery for the camera: a battery camera is set
 // up to push on its own, every other camera gets a listener session that lives
@@ -396,6 +435,11 @@ func (m *cameraDevice) WatchEvents(ctx context.Context, channel uint8, handlers 
 // charge within a day. Later connections re-register the webhook through
 // onConnect, so a camera that rebooted gets it back the next time anything
 // talks to it.
+//
+// The connection is only dropped once the camera has actually reached the
+// webhook address. A camera that is currently plugged in gets the same
+// treatment: whether it sleeps is the camera's business, and the power state
+// can change under us at any time.
 func (m *cameraDevice) watchLowPower(ctx context.Context, channel uint8, handlers eventHandlers) {
 	warned := false
 
@@ -422,14 +466,6 @@ func (m *cameraDevice) watchLowPower(ctx context.Context, channel uint8, handler
 			continue
 		}
 
-		if m.wiredPower(ctx, client, channel) {
-			// plugged in, so there is nothing to save: a connection gives
-			// faster and more complete events than the webhook does
-			m.log.Debugf("events: camera %s runs on a permanent supply, keeping the connection", m.cameraName)
-			m.watchEventsLoop(ctx, channel, handlers)
-			return
-		}
-
 		err = m.setupWebhookAndBatteryPoll(ctx, client, channel, handlers)
 
 		if m.webhookFailed.Load() {
@@ -451,12 +487,37 @@ func (m *cameraDevice) watchLowPower(ctx context.Context, channel uint8, handler
 			continue
 		}
 
+		if !m.awaitPush(ctx, webhookConfirmWait) {
+			if ctx.Err() != nil {
+				return
+			}
+			m.log.Warnf("events: camera %s has not reached %s yet, keeping the connection open until it does, which costs battery life", m.cameraName, handlers.webhookURL)
+
+			sessionCtx, endSession := context.WithCancel(ctx)
+			go m.endSessionWhenReachable(sessionCtx, endSession)
+			m.watchEventsLoop(sessionCtx, channel, handlers)
+			endSession()
+			continue
+		}
+
+		m.log.Infof("events: camera %s reached %s, letting it sleep between events", m.cameraName, handlers.webhookURL)
 		m.setOnConnect(func(next *baichuan.Client) {
 			next.CloseWhenIdle(lowPowerIdle)
 			_ = m.setupWebhookAndBatteryPoll(ctx, next, channel, handlers)
 		})
 		client.CloseWhenIdle(lowPowerIdle)
 		return
+	}
+}
+
+// endSessionWhenReachable ends a session that is only held open because the
+// camera never reached the webhook. The first push it manages proves it can.
+func (m *cameraDevice) endSessionWhenReachable(ctx context.Context, endSession context.CancelFunc) {
+	select {
+	case <-ctx.Done():
+	case <-m.pushSeen:
+		m.log.Infof("events: camera %s reached the push address, letting it sleep again", m.cameraName)
+		endSession()
 	}
 }
 
@@ -538,7 +599,7 @@ func (m *cameraDevice) runEventSession(ctx context.Context, client *baichuan.Cli
 	// A battery camera must not be poked while it sleeps; its events come over
 	// the webhook anyway.
 	var renew <-chan time.Time
-	if handlers.alarm != nil && !motionUnsupported && !handlers.pollBattery {
+	if handlers.alarm != nil && !motionUnsupported && !handlers.letSleep {
 		ticker := time.NewTicker(alarmRetryInterval)
 		defer ticker.Stop()
 		renew = ticker.C
@@ -601,22 +662,6 @@ func (m *cameraDevice) setupAlarmListener(ctx context.Context, client *baichuan.
 	m.ResetIfCurrent(client, fmt.Sprintf("alarm listener error: %v", err))
 	m.log.Warnf("events: alarm listener error for %s: %v. retrying in %v...", m.cameraName, err, m.reconnectBackoff)
 	return nil, false
-}
-
-// wiredPower asks the camera whether it currently runs off a permanent supply.
-// Battery doorbells are often wired to the bell transformer, and letting one
-// of those sleep costs events for nothing. Firmwares without the field, and a
-// camera that does not answer, count as running on battery.
-func (m *cameraDevice) wiredPower(ctx context.Context, client *baichuan.Client, channel uint8) bool {
-	askCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	info, err := client.GetBattery(askCtx, channel)
-	if err != nil || info == nil {
-		m.log.Debugf("events: camera %s did not report its power supply: %v", m.cameraName, err)
-		return false
-	}
-	return info.WiredPower()
 }
 
 // setupWebhookAndBatteryPoll registers the event webhook (battery cameras)

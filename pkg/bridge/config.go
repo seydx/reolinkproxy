@@ -52,8 +52,13 @@ type CameraConfig struct {
 	// IdleTimeout is the no-client duration before the preview stops (default 30s).
 	IdleTimeout time.Duration
 	// BatteryCamera uses a much longer reconnect backoff (30s instead of 2s)
-	// so a sleeping battery camera is not woken over and over.
+	// so a sleeping battery camera is not woken over and over, and lets the
+	// camera sleep between events instead of holding its radio awake.
 	BatteryCamera bool
+	// MainsPowered says a battery model is wired permanently, e.g. a doorbell
+	// on its bell transformer. It keeps its battery readings but is otherwise
+	// treated like a mains camera, because it has no reason to sleep.
+	MainsPowered bool
 	// AudioHints carries what a previous run learned about each profile's
 	// audio, keyed by profile name. A stream whose audio is known starts with
 	// the track already declared instead of waiting for the first packet; a

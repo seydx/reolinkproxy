@@ -129,6 +129,7 @@ func (c *Camera) handleWebhookPush(body []byte) {
 		c.bridge.log.Debugf("camera %s webhook: %v", c.cfg.Name, err)
 		return
 	}
+	c.device.notePush()
 
 	channel := uint8(c.cfg.Channel) //#nosec G115
 

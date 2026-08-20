@@ -160,8 +160,11 @@ func (b *Bridge) AddCamera(cfg CameraConfig) (*Camera, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// a camera that is allowed to sleep must not be dialled every two seconds
+	letSleep := cfg.BatteryCamera && !cfg.MainsPowered
+
 	reconnectBackoff := 2 * time.Second
-	if cfg.BatteryCamera {
+	if letSleep {
 		reconnectBackoff = 30 * time.Second
 	}
 	camLog := b.log
@@ -175,7 +178,7 @@ func (b *Bridge) AddCamera(cfg CameraConfig) (*Camera, error) {
 		Username: cfg.Username,
 		Password: cfg.Password,
 		Timeout:  cfg.Timeout,
-		LowPower: cfg.BatteryCamera,
+		LowPower: letSleep,
 	}, reconnectBackoff, camLog)
 
 	talkPath := talkPathForCamera(cfg.RTSPPath)
@@ -206,7 +209,7 @@ func (b *Bridge) AddCamera(cfg CameraConfig) (*Camera, error) {
 	// Battery cameras get a webhook so events arrive without a persistent
 	// TCP subscription keeping them awake; the TCP listener stays as backup.
 	webhookURL := ""
-	if cfg.BatteryCamera && b.webhook != nil {
+	if letSleep && b.webhook != nil {
 		if err := b.webhook.ensureStarted(); err != nil {
 			b.log.Warnf("camera %s: webhook server unavailable, battery events rely on the TCP listener: %v", cfg.Name, err)
 		} else {
@@ -229,8 +232,9 @@ func (b *Bridge) AddCamera(cfg CameraConfig) (*Camera, error) {
 			}
 		},
 		pollBattery: cfg.BatteryCamera,
+		letSleep:    letSleep,
 		webhookURL:  webhookURL,
-		lowPower:    cfg.BatteryCamera && webhookURL != "",
+		lowPower:    letSleep && webhookURL != "",
 	})
 
 	metas, streamPaths := b.setupCameraStreams(ctx, cam, cfg, device, talkPublisher, motionState)

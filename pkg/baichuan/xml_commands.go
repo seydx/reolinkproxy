@@ -198,12 +198,6 @@ type BatteryInfo struct {
 	PowerSupplyStatus string `xml:"powerSupplyStatus"`
 }
 
-// WiredPower reports a battery camera that is currently plugged in, so it has
-// no reason to sleep and can keep a connection like a mains camera.
-func (b BatteryInfo) WiredPower() bool {
-	return b.PowerSupplyStatus == "normal"
-}
-
 // BatteryMessage is the XML payload for battery information.
 type BatteryMessage struct {
 	BatteryInfo *BatteryInfo `xml:"BatteryInfo"`
