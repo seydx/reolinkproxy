@@ -42,7 +42,10 @@ type uidSession struct {
 	hasConsumed bool
 }
 
-func dialUIDLocal(ctx context.Context, uid string, timeout time.Duration) (*uidSession, error) {
+// dialUIDLocal opens the P2P transport. host, when known, is addressed
+// directly: the broadcast alone only reaches the local segment, and reolink_aio
+// talks to the camera's own address on the same port.
+func dialUIDLocal(ctx context.Context, uid string, host string, timeout time.Duration) (*uidSession, error) {
 	udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
 		return nil, err
@@ -84,7 +87,15 @@ func dialUIDLocal(ctx context.Context, uid string, timeout time.Duration) (*uidS
 		return nil, err
 	}
 
-	broadcasts := ipv4Broadcasts()
+	targets := ipv4Broadcasts()
+	if host != "" {
+		if hostOnly, _, splitErr := net.SplitHostPort(host); splitErr == nil {
+			host = hostOnly
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			targets = append([]net.IP{ip}, targets...)
+		}
+	}
 	deadline := time.Now().Add(timeout)
 	nextSend := time.Time{}
 
@@ -99,7 +110,7 @@ func dialUIDLocal(ctx context.Context, uid string, timeout time.Duration) (*uidS
 		}
 
 		if nextSend.IsZero() || time.Now().After(nextSend) {
-			for _, ip := range broadcasts {
+			for _, ip := range targets {
 				for _, port := range []int{2015, 2018} {
 					_, _ = udpConn.WriteToUDP(discoveryPacket, &net.UDPAddr{IP: ip, Port: port})
 				}

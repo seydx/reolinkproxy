@@ -221,7 +221,8 @@ func (b *Bridge) runStream(
 					readyToExpose = h264Format.SPS != nil && h264Format.PPS != nil
 				}
 
-				if !handler.ready() {
+				switch {
+				case !handler.ready():
 					if !readyToExpose {
 						if packet.Kind == baichuan.MediaPacketIFrame && logPackets {
 							log.Debugf("stream %s waiting for parameter sets before exposing RTSP path", meta.name)
@@ -244,7 +245,8 @@ func (b *Bridge) runStream(
 						confirmDeadline = time.Now().Add(audioConfirmWindow)
 					}
 					reportAudioHint(onHint, audio)
-				} else if declared && !audio.published && !confirmDeadline.IsZero() && time.Now().After(confirmDeadline) {
+
+				case declared && !audio.published && !confirmDeadline.IsZero() && time.Now().After(confirmDeadline):
 					// the track carried over from the last run never got a
 					// packet, e.g. the microphone was switched off since
 					if packet.Kind != baichuan.MediaPacketIFrame {
@@ -259,9 +261,11 @@ func (b *Bridge) runStream(
 					}
 					handler.reset()
 					continue
-				} else if declared && audio.published && !confirmDeadline.IsZero() {
+
+				case declared && audio.published && !confirmDeadline.IsZero():
 					confirmDeadline = time.Time{}
-				} else if rebuildForAudio {
+
+				case rebuildForAudio:
 					// wait for a keyframe so the rebuilt session starts decodable
 					if packet.Kind != baichuan.MediaPacketIFrame {
 						continue

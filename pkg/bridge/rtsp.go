@@ -531,15 +531,29 @@ type audioPublisher struct {
 	rebuildAsked   bool
 }
 
+// aacChannelConfig maps a channel count onto the 4-bit configuration field.
+// 7.1 is the one layout that is not its own count, everything the cameras send
+// is mono or stereo.
+func aacChannelConfig(channels int) uint8 {
+	switch {
+	case channels == 8:
+		return 7
+	case channels >= 1 && channels <= 6:
+		return uint8(channels) //#nosec G115
+	default:
+		return 0
+	}
+}
+
 // declareAAC builds the audio media from what a previous run observed, so the
 // session can start with the track in place instead of waiting for the first
 // packet. The stream corrects itself if the camera turns out to send something
 // else, or nothing at all.
 func (p *audioPublisher) declareAAC(sampleRate int, channels int) error {
 	cfg := &mpeg4audio.AudioSpecificConfig{
-		Type:         mpeg4audio.ObjectTypeAACLC,
-		SampleRate:   sampleRate,
-		ChannelCount: channels,
+		Type:          mpeg4audio.ObjectTypeAACLC,
+		SampleRate:    sampleRate,
+		ChannelConfig: aacChannelConfig(channels),
 	}
 	audioFormat := &format.MPEG4Audio{
 		PayloadTyp:       97,

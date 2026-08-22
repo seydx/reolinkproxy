@@ -132,6 +132,10 @@ type Config struct {
 	// even without debug logging, e.g. events arriving for a channel nobody
 	// listens on. Callers route it to their camera logger.
 	Warnf func(format string, args ...any)
+	// PreferUID tries the P2P transport before TCP. Callers set it after a
+	// connection came up that way, so a camera that only answers P2P is not
+	// waited out on TCP every time.
+	PreferUID bool
 	// LowPower marks a peer that must not be kept awake: a battery camera
 	// only sleeps once nothing holds its radio, so Login starts no keepalive.
 	// The caller decides what happens instead, see StartKeepAlive and

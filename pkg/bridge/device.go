@@ -134,6 +134,13 @@ func (m *cameraDevice) Ensure(ctx context.Context) (*baichuan.Client, error) {
 	}
 
 	m.client = client
+	// a camera that only answers over P2P must not be waited out on TCP again
+	if client.UsedUID() != m.cfg.PreferUID {
+		m.cfg.PreferUID = client.UsedUID()
+		if m.cfg.PreferUID {
+			m.log.Debugf("camera %s answers over its UID, using that first from now on", m.cameraName)
+		}
+	}
 	m.dualLens = client.LoginDeviceInfo().IsDualLens()
 	m.notifyState(true)
 	if m.onConnect != nil {

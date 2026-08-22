@@ -96,25 +96,37 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 		err       error
 	)
 
-	switch {
-	case cfg.Host != "":
-		address := cfg.Host
-		if _, _, splitErr := net.SplitHostPort(address); splitErr != nil {
-			address = net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
-		}
+	preferUID := cfg.PreferUID && cfg.UID != ""
 
-		var conn net.Conn
-		dialer := net.Dialer{Timeout: cfg.Timeout}
-		conn, err = dialer.DialContext(ctx, "tcp", address)
+	switch {
+	case cfg.Host != "" && !preferUID:
+		transport, err = dialTCP(ctx, cfg)
 		if err != nil {
-			return nil, err
+			if cfg.UID == "" {
+				return nil, err
+			}
+			// A sleeping battery camera refuses the connection outright: it
+			// keeps no TCP port open, only the P2P transport answers.
+			var uidErr error
+			transport, uidErr = dialUIDLocal(ctx, cfg.UID, cfg.Host, cfg.Timeout)
+			if uidErr != nil {
+				return nil, fmt.Errorf("%w (uid transport: %v)", err, uidErr)
+			}
+			isUDP = true
 		}
-		transport = conn
 
 	case cfg.UID != "":
-		transport, err = dialUIDLocal(ctx, cfg.UID, cfg.Timeout)
+		transport, err = dialUIDLocal(ctx, cfg.UID, cfg.Host, cfg.Timeout)
 		if err != nil {
-			return nil, err
+			if cfg.Host == "" {
+				return nil, err
+			}
+			var tcpErr error
+			transport, tcpErr = dialTCP(ctx, cfg)
+			if tcpErr != nil {
+				return nil, fmt.Errorf("%w (tcp transport: %v)", err, tcpErr)
+			}
+			break
 		}
 		isUDP = true
 
@@ -164,7 +176,7 @@ func (c *Client) dispatch(msg *Message) {
 	}
 
 	c.subMu.RLock()
-	var subs []*subscription
+	subs := make([]*subscription, 0, len(c.subs[msg.Header.MsgID]))
 	for sub := range c.subs[msg.Header.MsgID] {
 		subs = append(subs, sub)
 	}
@@ -328,6 +340,22 @@ func (c *Client) idleCloseLoop(after time.Duration) {
 			return
 		}
 	}
+}
+
+func dialTCP(ctx context.Context, cfg Config) (net.Conn, error) {
+	address := cfg.Host
+	if _, _, splitErr := net.SplitHostPort(address); splitErr != nil {
+		address = net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
+	}
+
+	dialer := net.Dialer{Timeout: cfg.Timeout}
+	return dialer.DialContext(ctx, "tcp", address)
+}
+
+// UsedUID reports whether the connection runs over the P2P transport instead
+// of TCP.
+func (c *Client) UsedUID() bool {
+	return c.isUDP
 }
 
 func (c *Client) keepAliveLoop() {
