@@ -102,11 +102,9 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 	case cfg.Host != "" && !preferUID:
 		transport, err = dialTCP(ctx, cfg)
 		if err != nil {
-			if cfg.UID == "" {
-				return nil, err
-			}
 			// A sleeping battery camera refuses the connection outright: it
-			// keeps no TCP port open, only the P2P transport answers.
+			// keeps no TCP port open, only the P2P transport answers. That
+			// transport resolves the UID itself when none is stored.
 			var uidErr error
 			transport, uidErr = dialUIDLocal(ctx, cfg.UID, cfg.Host, cfg.Timeout)
 			if uidErr != nil {
@@ -356,6 +354,15 @@ func dialTCP(ctx context.Context, cfg Config) (net.Conn, error) {
 // of TCP.
 func (c *Client) UsedUID() bool {
 	return c.isUDP
+}
+
+// UID returns the camera's UID as the P2P transport learned it, empty on TCP.
+// Callers persist it so later dials skip the query round trip.
+func (c *Client) UID() string {
+	if session, ok := c.transport.(*uidSession); ok {
+		return session.uid
+	}
+	return ""
 }
 
 func (c *Client) keepAliveLoop() {

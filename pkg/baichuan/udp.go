@@ -42,10 +42,17 @@ func (udpDataPacket) packetType() uint32 { return udpMagicData }
 
 type udpP2PEnvelope struct {
 	XMLName xml.Name       `xml:"P2P"`
+	C2DS    *udpC2DS       `xml:"C2D_S,omitempty"`
 	C2DC    *udpC2DC       `xml:"C2D_C,omitempty"`
 	D2CCR   *udpD2CCR      `xml:"D2C_C_R,omitempty"`
 	C2DDisc *udpDisconnect `xml:"C2D_DISC,omitempty"`
 	D2CDisc *udpDisconnect `xml:"D2C_DISC,omitempty"`
+}
+
+// udpC2DS asks the device on the other end for its UID, so a camera known
+// only by IP can still be connected over the P2P transport.
+type udpC2DS struct {
+	To udpPortList `xml:"to"`
 }
 
 type udpC2DC struct {

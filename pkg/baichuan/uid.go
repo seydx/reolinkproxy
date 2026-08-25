@@ -12,11 +12,13 @@ import (
 	"math"
 	mathrand "math/rand"
 	"net"
+	"strings"
 	"sync"
 	"time"
 )
 
 type uidSession struct {
+	uid        string
 	conn       *net.UDPConn
 	remoteAddr *net.UDPAddr
 	mtu        int
@@ -42,10 +44,21 @@ type uidSession struct {
 	hasConsumed bool
 }
 
+// uidWakeTimeout floors the P2P dial: a sleeping battery camera has to wake
+// its radio first and was observed to answer only after ~11s of pings, so a
+// caller's shorter request timeout would give up right before it does.
+const uidWakeTimeout = 20 * time.Second
+
 // dialUIDLocal opens the P2P transport. host, when known, is addressed
 // directly: the broadcast alone only reaches the local segment, and reolink_aio
-// talks to the camera's own address on the same port.
+// talks to the camera's own address on the same port. With an empty uid the
+// camera at host is asked for its UID first (C2D_S), so a camera added by IP
+// alone can still be reached this way.
 func dialUIDLocal(ctx context.Context, uid string, host string, timeout time.Duration) (*uidSession, error) {
+	if timeout < uidWakeTimeout {
+		timeout = uidWakeTimeout
+	}
+
 	udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
 		return nil, err
@@ -57,6 +70,27 @@ func dialUIDLocal(ctx context.Context, uid string, host string, timeout time.Dur
 	}
 
 	localPort := udpConn.LocalAddr().(*net.UDPAddr).Port
+
+	if host != "" {
+		if hostOnly, _, splitErr := net.SplitHostPort(host); splitErr == nil {
+			host = hostOnly
+		}
+	}
+	hostIP := net.ParseIP(host)
+
+	deadline := time.Now().Add(timeout)
+
+	if uid == "" {
+		if hostIP == nil {
+			udpConn.Close()
+			return nil, fmt.Errorf("either uid or a host ip is required for the p2p transport")
+		}
+		uid, err = queryUIDLocal(ctx, udpConn, hostIP, localPort, deadline)
+		if err != nil {
+			udpConn.Close()
+			return nil, err
+		}
+	}
 
 	tid := uint32(randomUint8())
 	clientID := randomInt32()
@@ -88,15 +122,9 @@ func dialUIDLocal(ctx context.Context, uid string, host string, timeout time.Dur
 	}
 
 	targets := ipv4Broadcasts()
-	if host != "" {
-		if hostOnly, _, splitErr := net.SplitHostPort(host); splitErr == nil {
-			host = hostOnly
-		}
-		if ip := net.ParseIP(host); ip != nil {
-			targets = append([]net.IP{ip}, targets...)
-		}
+	if hostIP != nil {
+		targets = append([]net.IP{hostIP}, targets...)
 	}
-	deadline := time.Now().Add(timeout)
 	nextSend := time.Time{}
 
 	for {
@@ -157,6 +185,7 @@ func dialUIDLocal(ctx context.Context, uid string, host string, timeout time.Dur
 		}
 
 		session := &uidSession{
+			uid:         uid,
 			conn:        udpConn,
 			remoteAddr:  addr,
 			mtu:         int(defaultUIDMTU),
@@ -173,6 +202,90 @@ func dialUIDLocal(ctx context.Context, uid string, host string, timeout time.Dur
 		go session.writeLoop()
 		return session, nil
 	}
+}
+
+// queryUIDLocal asks the camera at ip for its UID. Only that address is
+// spoken to: a broadcast would collect the UID of whichever camera answers
+// first. The reply's list element differs between firmwares, so the uid tag is
+// extracted wherever it sits, like reolink_aio does.
+func queryUIDLocal(ctx context.Context, udpConn *net.UDPConn, ip net.IP, localPort int, deadline time.Time) (string, error) {
+	tid := uint32(randomUint8())
+
+	xmlPayload, err := marshalUDPXML(udpP2PEnvelope{
+		C2DS: &udpC2DS{To: udpPortList{Port: localPort}},
+	})
+	if err != nil {
+		return "", err
+	}
+	queryPacket, err := marshalUDPPacket(udpDiscoveryPacket{
+		TID:     tid,
+		Payload: UDPXOR(tid, xmlPayload),
+	})
+	if err != nil {
+		return "", err
+	}
+
+	nextSend := time.Time{}
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("uid query timed out")
+		}
+
+		if nextSend.IsZero() || time.Now().After(nextSend) {
+			for _, port := range []int{2015, 2018} {
+				_, _ = udpConn.WriteToUDP(queryPacket, &net.UDPAddr{IP: ip, Port: port})
+			}
+			nextSend = time.Now().Add(500 * time.Millisecond)
+		}
+
+		readDeadline := nextSend
+		if deadline.Before(readDeadline) {
+			readDeadline = deadline
+		}
+		if err := udpConn.SetReadDeadline(readDeadline); err != nil {
+			return "", err
+		}
+
+		buf := make([]byte, defaultUIDMTU)
+		n, _, err := udpConn.ReadFromUDP(buf)
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				continue
+			}
+			return "", err
+		}
+
+		packet, err := parseUDPPacket(buf[:n])
+		if err != nil {
+			continue
+		}
+		reply, ok := packet.(udpDiscoveryPacket)
+		if !ok {
+			continue
+		}
+		if uid := xmlElementValue(UDPXOR(reply.TID, reply.Payload), "uid"); uid != "" {
+			return uid, nil
+		}
+	}
+}
+
+// xmlElementValue extracts the first <name>...</name> value wherever it sits
+// in the document.
+func xmlElementValue(doc []byte, name string) string {
+	open := []byte("<" + name + ">")
+	start := bytes.Index(doc, open)
+	if start < 0 {
+		return ""
+	}
+	start += len(open)
+	end := bytes.Index(doc[start:], []byte("</"+name+">"))
+	if end < 0 {
+		return ""
+	}
+	return strings.TrimSpace(string(doc[start : start+end]))
 }
 
 func (s *uidSession) Read(p []byte) (int, error) {
