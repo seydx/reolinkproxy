@@ -506,12 +506,28 @@ func (h *rtspStreamHandler) writePacket(media *description.Media, pkt *rtp.Packe
 	stream := h.stream
 	mirrors := append([]*rtspStreamHandler(nil), h.mirrors...)
 	h.mu.RUnlock()
-	if stream != nil {
+	// late audio is configured and starts publishing before the rebuild that
+	// adds its media to the session runs (it waits for the next keyframe);
+	// gortsplib dereferences a nil stream-media for a media it doesn't carry,
+	// so only write a media the current session actually holds
+	if stream != nil && streamCarriesMedia(stream, media) {
 		_ = stream.WritePacketRTP(media, pkt)
 	}
 	for _, mirror := range mirrors {
 		mirror.writePacket(media, pkt)
 	}
+}
+
+func streamCarriesMedia(stream *gortsplib.ServerStream, media *description.Media) bool {
+	if stream.Desc == nil {
+		return false
+	}
+	for _, m := range stream.Desc.Medias {
+		if m == media {
+			return true
+		}
+	}
+	return false
 }
 
 type audioPublisher struct {

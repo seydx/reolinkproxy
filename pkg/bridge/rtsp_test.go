@@ -361,3 +361,50 @@ func TestDeclareAACBuildsTheTrackFromAHint(t *testing.T) {
 		t.Fatalf("dropped publisher reports %+v, want silence", got)
 	}
 }
+
+// Late audio configures its media and starts publishing before the rebuild
+// that adds it to the session runs (the rebuild waits for the next keyframe).
+// Writing that media to the still video-only session used to crash inside
+// gortsplib with a nil stream-media. The write must be dropped until the
+// session carries the media.
+func TestWritePacketDropsAMediaTheSessionDoesNotCarry(t *testing.T) {
+	t.Parallel()
+
+	server := &gortsplib.Server{RTSPAddress: "127.0.0.1:0"}
+	if err := server.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer server.Close()
+
+	handler := newRTSPStreamHandler("cam/stream")
+	handler.attachServer(server)
+
+	video := &description.Media{
+		Type:    description.MediaTypeVideo,
+		Control: "trackID=0",
+		Formats: []format.Format{&format.H264{PayloadTyp: 96, PacketizationMode: 1}},
+	}
+	audio := &description.Media{
+		Type:    description.MediaTypeAudio,
+		Control: "trackID=1",
+		Formats: []format.Format{&format.MPEG4Audio{PayloadTyp: 97, Config: &mpeg4audio.AudioSpecificConfig{Type: 2, SampleRate: 16000, ChannelCount: 1}, SizeLength: 13, IndexLength: 3, IndexDeltaLength: 3}},
+	}
+
+	if err := handler.setReady(video); err != nil {
+		t.Fatalf("setReady(video) error = %v", err)
+	}
+
+	// audio packet arrives during the late-audio window, before the rebuild —
+	// this must not panic (it used to, inside gortsplib)
+	handler.writePacket(audio, &rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: 97}, Payload: []byte{0x01, 0x02, 0x03}})
+
+	// once the session is rebuilt with the audio media, the same write goes out
+	handler.reset()
+	if err := handler.setReady(video, audio); err != nil {
+		t.Fatalf("setReady(video, audio) error = %v", err)
+	}
+	if !streamCarriesMedia(handler.stream, audio) {
+		t.Fatal("rebuilt session does not carry the audio media")
+	}
+	handler.writePacket(audio, &rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: 97}, Payload: []byte{0x01, 0x02, 0x03}})
+}
