@@ -169,6 +169,21 @@ func (b *Bridge) runStream(
 				continuousUS, cameraUS := timeline.video(packet.TimestampMicrosecs)
 				lastVideoUS, haveVideoUS = continuousUS, true
 
+				// the camera can switch codec mid-connection (user toggles
+				// H.264/H.265 in its settings); the session was negotiated for
+				// the old one, so rebuild it like the late-audio path does
+				if videoFormat != nil && !codecMatchesFormat(packet.Codec, videoFormat) {
+					// wait for a keyframe so the rebuilt session starts decodable
+					if packet.Kind != baichuan.MediaPacketIFrame {
+						continue
+					}
+					log.Infof("stream %s video codec changed to %s, restarting session", meta.name, packet.Codec)
+					videoFormat = nil
+					videoEncoder = nil
+					videoMedia.Formats = nil
+					handler.reset()
+				}
+
 				if videoFormat == nil {
 					meta.setVideoCodec(packet.Codec)
 					switch packet.Codec {
@@ -654,4 +669,13 @@ func parseStream(v string) baichuan.Stream {
 	default:
 		return baichuan.StreamMain
 	}
+}
+
+func codecMatchesFormat(codec string, f format.Format) bool {
+	if codec == "H265" {
+		_, ok := f.(*format.H265)
+		return ok
+	}
+	_, ok := f.(*format.H264)
+	return ok
 }
