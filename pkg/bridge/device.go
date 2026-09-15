@@ -11,6 +11,11 @@ import (
 	"github.com/shareed2k/reolinkproxy/pkg/baichuan"
 )
 
+// uidReprobeInterval bounds how long a Host camera stays on the UID fallback
+// before a reconnect retries direct TCP; a re-probe of an unreachable host
+// costs one dial timeout, so this stays well above it.
+const uidReprobeInterval = 5 * time.Minute
+
 type cameraDevice struct {
 	cameraName string
 	cfg        baichuan.Config
@@ -46,6 +51,10 @@ type cameraDevice struct {
 
 	mu     sync.Mutex
 	client *baichuan.Client
+	// preferUIDSince stamps when the UID fallback was last set or re-probed, so
+	// a camera with a configured Host retries direct TCP instead of staying on
+	// UID forever after a transient TCP failure
+	preferUIDSince time.Time
 	// dualLens caches the last login's dual-lens flag so webhook pushes can
 	// be parsed while the camera sleeps
 	dualLens bool
@@ -124,7 +133,13 @@ func (m *cameraDevice) Ensure(ctx context.Context) (*baichuan.Client, error) {
 		m.closeLocked("")
 	}
 
-	client, err := baichuan.Dial(ctx, m.cfg)
+	dialCfg := m.cfg
+	if m.shouldReprobeTCPLocked() {
+		dialCfg.PreferUID = false
+		m.preferUIDSince = time.Now()
+	}
+
+	client, err := baichuan.Dial(ctx, dialCfg)
 	if err != nil {
 		return nil, err
 	}
@@ -134,19 +149,33 @@ func (m *cameraDevice) Ensure(ctx context.Context) (*baichuan.Client, error) {
 	}
 
 	m.client = client
-	// a camera that only answers over P2P must not be waited out on TCP again
-	if client.UsedUID() != m.cfg.PreferUID {
-		m.cfg.PreferUID = client.UsedUID()
-		if m.cfg.PreferUID {
-			m.log.Debugf("camera %s answers over its UID, using that first from now on", m.cameraName)
-		}
-	}
+	m.noteTransportLocked(client.UsedUID())
 	m.dualLens = client.LoginDeviceInfo().IsDualLens()
 	m.notifyState(true)
 	if m.onConnect != nil {
 		go m.onConnect(client)
 	}
 	return client, nil
+}
+
+func (m *cameraDevice) shouldReprobeTCPLocked() bool {
+	return m.cfg.Host != "" && m.cfg.PreferUID && time.Since(m.preferUIDSince) >= uidReprobeInterval
+}
+
+// noteTransportLocked reconciles the sticky UID preference with the transport
+// the connection actually used. A configured Host keeps direct TCP as the
+// intended path, so a UID fallback is dropped again the moment TCP answers.
+func (m *cameraDevice) noteTransportLocked(usedUID bool) {
+	if usedUID == m.cfg.PreferUID {
+		return
+	}
+	m.cfg.PreferUID = usedUID
+	if usedUID {
+		m.preferUIDSince = time.Now()
+		m.log.Debugf("camera %s answers over its UID, using that first from now on", m.cameraName)
+		return
+	}
+	m.log.Debugf("camera %s reached over TCP again, leaving the UID fallback", m.cameraName)
 }
 
 // setOnConnect installs the preparation every later connection needs.
