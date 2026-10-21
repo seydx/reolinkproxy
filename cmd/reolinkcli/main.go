@@ -30,7 +30,7 @@ Usage:
   reolinkcli <conn flags> siren <on|off>
   reolinkcli <conn flags> led <on|off>
   reolinkcli <conn flags> ptz <left|right|up|down|zoomInc|zoomDec|stop> [-speed 16] [-d 1s]
-  reolinkcli <conn flags> raw -msg <id> [-body '<xml>']
+  reolinkcli <conn flags> raw -msg <id> [-body '<xml>'] [-host]
 
 Connection flags (before the command):
   -host <ip>     camera IP (Baichuan TCP)
@@ -143,8 +143,8 @@ func main() {
 		exitOn(err)
 		fmt.Printf("channels=%d audioTalk=%t externStream=%t\n", support.ChannelNum, support.AudioTalk, support.ExternStream)
 		for _, chn := range support.Channels {
-			fmt.Printf("  ch%d: ptz=%t (pan=%t tilt=%t zoom=%t) battery=%t doorbell=%t siren=%t floodlight=%t motion=%t ai=%v\n",
-				chn.Channel, chn.PTZ, chn.Pan, chn.Tilt, chn.Zoom, chn.Battery, chn.Doorbell, chn.Siren, chn.Floodlight, chn.Motion, chn.AITypes)
+			fmt.Printf("  ch%d: ptz=%t (pan=%t tilt=%t zoom=%t) battery=%t doorbell=%t siren=%t floodlight=%t talk=%t motion=%t ai=%v\n",
+				chn.Channel, chn.PTZ, chn.Pan, chn.Tilt, chn.Zoom, chn.Battery, chn.Doorbell, chn.Siren, chn.Floodlight, chn.Talk, chn.Motion, chn.AITypes)
 		}
 		profiles, err := client.StreamProfiles(ctx, ch)
 		exitOn(err)
@@ -210,11 +210,12 @@ func main() {
 		fs := flag.NewFlagSet("raw", flag.ExitOnError)
 		msgID := fs.Uint("msg", 0, "baichuan message ID")
 		body := fs.String("body", "", "XML body (without header)")
+		host := fs.Bool("host", false, "address the device instead of the channel (e.g. msg 199)")
 		_ = fs.Parse(args)
 		if *msgID == 0 {
 			exitOn(fmt.Errorf("raw needs -msg <id>"))
 		}
-		xmlText, err := client.RawCommand(ctx, uint32(*msgID), ch, *body)
+		xmlText, err := client.RawCommand(ctx, uint32(*msgID), ch, *body, *host)
 		exitOn(err)
 		fmt.Println(xmlText)
 	}

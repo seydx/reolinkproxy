@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/shareed2k/reolinkproxy/pkg/baichuan"
 )
@@ -86,6 +87,24 @@ func (c *Camera) Reboot(ctx context.Context) error {
 	return c.device.WithClient(ctx, func(client *baichuan.Client) error {
 		return client.Reboot(ctx, c.channel())
 	})
+}
+
+// Capabilities reads the channel's hardware capabilities from the camera's
+// Support report.
+func (c *Camera) Capabilities(ctx context.Context) (baichuan.ChannelCapabilities, error) {
+	var caps baichuan.ChannelCapabilities
+	err := c.device.WithClient(ctx, func(client *baichuan.Client) error {
+		support, err := client.GetSupport(ctx)
+		if err != nil {
+			return err
+		}
+		var ok bool
+		if caps, ok = support.CapabilitiesFor(c.channel()); !ok {
+			return fmt.Errorf("support report has no channel %d", c.channel())
+		}
+		return nil
+	})
+	return caps, err
 }
 
 func (c *Camera) channel() uint8 {

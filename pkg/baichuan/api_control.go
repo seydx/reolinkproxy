@@ -246,8 +246,9 @@ func (c *Client) Reboot(ctx context.Context, channel uint8) error {
 
 // RawCommand sends an arbitrary Baichuan command and returns the reply XML.
 // A debugging/exploration helper for probing firmware behavior; body may be
-// empty for query-style commands.
-func (c *Client) RawCommand(ctx context.Context, msgID uint32, channel uint8, body string) (string, error) {
+// empty for query-style commands. host addresses the device instead of the
+// channel, the way device-wide commands such as msg 199 expect it.
+func (c *Client) RawCommand(ctx context.Context, msgID uint32, channel uint8, body string, host bool) (string, error) {
 	if err := c.Login(ctx); err != nil {
 		return "", err
 	}
@@ -257,10 +258,15 @@ func (c *Client) RawCommand(ctx context.Context, msgID uint32, channel uint8, bo
 		bodyBytes = append([]byte(xml.Header), []byte(body)...)
 	}
 
+	headerChannel, extension := headerChannelID(channel), channelExtension(channel)
+	if host {
+		headerChannel, extension = channelIDHost, nil
+	}
 	resp, err := c.sendRequest(ctx, request{
 		MsgID:     msgID,
-		ChannelID: channel,
+		ChannelID: headerChannel,
 		Class:     classModernWithOffset,
+		Extension: extension,
 		Body:      bodyBytes,
 	})
 	if err != nil {

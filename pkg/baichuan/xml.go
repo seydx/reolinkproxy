@@ -165,6 +165,9 @@ func parseLoginDeviceInfo(xmlText string) LoginDeviceInfo {
 }
 
 func parseNonce(xmlText string) (string, error) {
+	if xmlElementText(xmlText, "sigVer") == "v3" {
+		return "", &AccountDeviceError{}
+	}
 	var body xmlBody
 	if err := xml.Unmarshal([]byte(xmlText), &body); err != nil {
 		return "", err
@@ -173,6 +176,25 @@ func parseNonce(xmlText string) (string, error) {
 		return "", fmt.Errorf("nonce missing from login response")
 	}
 	return body.Encryption.Nonce, nil
+}
+
+func xmlElementText(xmlText string, name string) string {
+	dec := xml.NewDecoder(strings.NewReader(xmlText))
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return ""
+		}
+		start, ok := tok.(xml.StartElement)
+		if !ok || start.Name.Local != name {
+			continue
+		}
+		var text string
+		if err := dec.DecodeElement(&text, &start); err != nil {
+			return ""
+		}
+		return text
+	}
 }
 
 func parseExtension(buf []byte) (*Extension, error) {

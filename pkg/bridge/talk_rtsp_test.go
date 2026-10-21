@@ -298,20 +298,34 @@ func TestRTSPTalkInputDecodeLPCM(t *testing.T) {
 	}
 }
 
-func TestResamplePCM(t *testing.T) {
+func TestPCMResamplerInterpolatesAcrossPackets(t *testing.T) {
 	t.Parallel()
 
-	in := []int16{0, 1000, 2000, 3000}
-	out := resamplePCM(in, 8000, 16000)
+	r := newPCMResampler(8000, 16000)
+	out := append(r.resample([]int16{0, 1000, 2000}), r.resample([]int16{3000, 4000})...)
 
-	if got, want := len(out), 8; got != want {
-		t.Fatalf("len(out) = %d, want %d", got, want)
+	want := []int16{0, 500, 1000, 1500, 2000, 2500, 3000, 3500}
+	if len(out) != len(want) {
+		t.Fatalf("out = %v, want %v", out, want)
 	}
-	if out[0] != in[0] {
-		t.Fatalf("out[0] = %d, want %d", out[0], in[0])
+	for i := range want {
+		if out[i] != want[i] {
+			t.Fatalf("out = %v, want %v", out, want)
+		}
 	}
-	if out[len(out)-1] != in[len(in)-1] {
-		t.Fatalf("out[last] = %d, want %d", out[len(out)-1], in[len(in)-1])
+}
+
+func TestPCMResamplerKeepsTheRateOverManyPackets(t *testing.T) {
+	t.Parallel()
+
+	r := newPCMResampler(8000, 16000)
+	total := 0
+	for range 50 {
+		total += len(r.resample(make([]int16, 160)))
+	}
+	// one input sample stays behind as the left neighbour of the next packet
+	if got, want := total, 2*(50*160-1); got != want {
+		t.Fatalf("total = %d, want %d", got, want)
 	}
 }
 

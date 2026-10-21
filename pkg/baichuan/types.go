@@ -222,6 +222,14 @@ func (e *StatusError) Error() string {
 	return fmt.Sprintf("baichuan cmd %d failed with status %d", e.MsgID, e.Code)
 }
 
+// AccountDeviceError is returned when the camera is set up as a Reolink
+// account device, which refuses local logins.
+type AccountDeviceError struct{}
+
+func (e *AccountDeviceError) Error() string {
+	return "the camera is set up as a Reolink account device, which blocks local login; reset it to a local device"
+}
+
 // MediaPacketKind identifies the parsed bcmedia payload type.
 type MediaPacketKind int
 

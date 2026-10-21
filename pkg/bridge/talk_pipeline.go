@@ -137,43 +137,40 @@ func (i *rtspTalkInput) decode(pkt *rtp.Packet) ([]int16, error) {
 	return out, nil
 }
 
-func resamplePCM(in []int16, fromRate int, toRate int) []int16 {
-	if len(in) == 0 || fromRate <= 0 || toRate <= 0 {
-		return nil
-	}
-	if fromRate == toRate {
-		return append([]int16(nil), in...)
-	}
-	if len(in) == 1 {
-		outLen := int((int64(len(in))*int64(toRate) + int64(fromRate) - 1) / int64(fromRate))
-		if outLen < 1 {
-			outLen = 1
+type pcmResampler struct {
+	from   int64
+	to     int64
+	pos    int64 // next output position in 1/to input samples, counted from prev
+	prev   int16
+	primed bool
+}
+
+func newPCMResampler(fromRate int, toRate int) *pcmResampler {
+	return &pcmResampler{from: int64(fromRate), to: int64(toRate)}
+}
+
+func (r *pcmResampler) resample(in []int16) []int16 {
+	if !r.primed {
+		if len(in) == 0 {
+			return nil
 		}
-		out := make([]int16, outLen)
-		for i := range out {
-			out[i] = in[0]
-		}
-		return out
+		r.prev, in, r.primed = in[0], in[1:], true
 	}
 
-	outLen := int((int64(len(in))*int64(toRate) + int64(fromRate) - 1) / int64(fromRate))
-	if outLen < 1 {
-		outLen = 1
-	}
-
-	out := make([]int16, outLen)
-	for i := 0; i < outLen; i++ {
-		positionNum := int64(i) * int64(fromRate)
-		baseIndex := int(positionNum / int64(toRate))
-		if baseIndex >= len(in)-1 {
-			out[i] = in[len(in)-1]
-			continue
+	limit := int64(len(in)) * r.to
+	out := make([]int16, 0, (limit-r.pos)/r.from+1)
+	for ; r.pos < limit; r.pos += r.from {
+		base := r.pos / r.to
+		a := int64(r.prev)
+		if base > 0 {
+			a = int64(in[base-1])
 		}
-
-		fraction := positionNum % int64(toRate)
-		a := int64(in[baseIndex])
-		b := int64(in[baseIndex+1])
-		out[i] = int16(a + ((b-a)*fraction)/int64(toRate)) //#nosec G115
+		b := int64(in[base])
+		out = append(out, int16(a+(b-a)*(r.pos%r.to)/r.to)) //#nosec G115
+	}
+	r.pos -= limit
+	if len(in) > 0 {
+		r.prev = in[len(in)-1]
 	}
 	return out
 }
@@ -336,17 +333,10 @@ func (p *talkbackPipeline) runBridgeInternal(
 	idleTimer := time.NewTimer(5 * time.Second)
 	defer idleTimer.Stop()
 
-	processPCM := func(pcm []int16) error {
-		pcmPackets++
-		pcmSamples += len(pcm)
-		if input.sampleRate != targetSampleRate {
-			pcm = resamplePCM(pcm, input.sampleRate, targetSampleRate)
-		}
-		if len(pcm) == 0 {
-			return nil
-		}
+	resampler := newPCMResampler(input.sampleRate, targetSampleRate)
+	writeParent := ctx
 
-		pcmBuffer = append(pcmBuffer, pcm...)
+	writeBlocks := func() error {
 		for len(pcmBuffer) >= blockSamples {
 			block, err := encoder.EncodeBlock(pcmBuffer[:blockSamples])
 			if err != nil {
@@ -354,7 +344,7 @@ func (p *talkbackPipeline) runBridgeInternal(
 				return err
 			}
 
-			writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			writeCtx, cancel := context.WithTimeout(writeParent, 5*time.Second)
 			err = talkSession.WriteADPCMBlock(writeCtx, block)
 			cancel()
 			if err != nil {
@@ -366,6 +356,33 @@ func (p *talkbackPipeline) runBridgeInternal(
 			pcmBuffer = pcmBuffer[blockSamples:]
 		}
 		return nil
+	}
+
+	processPCM := func(pcm []int16) error {
+		pcmPackets++
+		pcmSamples += len(pcm)
+		if input.sampleRate != targetSampleRate {
+			pcm = resampler.resample(pcm)
+		}
+		pcmBuffer = append(pcmBuffer, pcm...)
+		return writeBlocks()
+	}
+
+	// the queue and the partial block are the end of the last phrase, the
+	// caller's ctx is already gone when the client hangs up
+	flush := func() {
+		tailCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		writeParent = tailCtx
+		for len(pcmCh) > 0 {
+			if processPCM(<-pcmCh) != nil {
+				return
+			}
+		}
+		if len(pcmBuffer) > 0 {
+			pcmBuffer = append(pcmBuffer, make([]int16, blockSamples-len(pcmBuffer))...)
+			_ = writeBlocks()
+		}
 	}
 
 	// Opening the talk session takes a moment, and the audio that piled up
@@ -394,9 +411,11 @@ func (p *talkbackPipeline) runBridgeInternal(
 		select {
 		case <-ctx.Done():
 			p.log.Debugf("talk internal bridge context done path=%s err=%v", path, ctx.Err())
+			flush()
 			return nil
 
 		case <-idleTimer.C:
+			flush()
 			return nil
 
 		case pcm := <-pcmCh:

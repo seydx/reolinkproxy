@@ -16,6 +16,13 @@ import (
 // costs one dial timeout, so this stays well above it.
 const uidReprobeInterval = 5 * time.Minute
 
+const uidLoginTimeout = 30 * time.Second
+
+const (
+	previewRejectedPauseMin = 2 * time.Second
+	previewRejectedPauseMax = time.Minute
+)
+
 type cameraDevice struct {
 	cameraName string
 	cfg        baichuan.Config
@@ -143,7 +150,16 @@ func (m *cameraDevice) Ensure(ctx context.Context) (*baichuan.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := client.Login(ctx); err != nil {
+	// a camera that accepts the connection and never answers would hold m.mu for every caller;
+	// a battery camera woken over its UID takes about 20 s to answer
+	loginTimeout := m.cfg.Timeout
+	if client.UsedUID() {
+		loginTimeout = max(loginTimeout, uidLoginTimeout)
+	}
+	loginCtx, cancel := context.WithTimeout(ctx, loginTimeout)
+	err = client.Login(loginCtx)
+	cancel()
+	if err != nil {
 		_ = client.Close()
 		return nil, err
 	}
@@ -286,6 +302,7 @@ func (m *cameraDevice) StreamPackets(ctx context.Context, channel uint8, stream 
 	go func() {
 		defer close(out)
 
+		var rejectedPause time.Duration
 		for ctx.Err() == nil {
 			if wantStream != nil && !wantStream() {
 				select {
@@ -309,16 +326,20 @@ func (m *cameraDevice) StreamPackets(ctx context.Context, channel uint8, stream 
 			reader, err := client.StartPreview(ctx, channel, stream)
 			if err != nil {
 				// A status error means the connection is fine but this stream
-				// is rejected (e.g. profile not supported by the model). The
-				// client is shared with the other streams and the event
-				// listener, so don't reset it — just retry this stream slowly.
+				// is rejected, by a camera still busy after connecting or for a
+				// profile the model lacks. The client is shared with the other
+				// streams and the event listener, so don't reset it, retry this
+				// stream with a growing pause.
 				var statusErr *baichuan.StatusError
 				if errors.As(err, &statusErr) {
-					m.log.Warnf("stream %s channel %d rejected by camera (%v), retrying in 5m", m.cameraName, channel, err)
+					if rejectedPause == 0 {
+						m.log.Warnf("stream %s channel %d rejected by camera (%v), retrying", m.cameraName, channel, err)
+					}
+					rejectedPause = min(max(2*rejectedPause, previewRejectedPauseMin), previewRejectedPauseMax)
 					select {
 					case <-ctx.Done():
 						return
-					case <-time.After(5 * time.Minute):
+					case <-time.After(rejectedPause):
 					}
 					continue
 				}
@@ -331,6 +352,7 @@ func (m *cameraDevice) StreamPackets(ctx context.Context, channel uint8, stream 
 				}
 				continue
 			}
+			rejectedPause = 0
 
 			switch m.pumpPreview(ctx, client, channel, stream, reader, out, wantStream) {
 			case previewContextDone:
@@ -803,7 +825,9 @@ func (s *resilientTalkSession) WriteADPCMBlock(ctx context.Context, block []byte
 
 	newSession, err := client.StartTalk(ctx, s.channel)
 	if err != nil {
-		s.device.ResetIfCurrent(client, fmt.Sprintf("talk restart error: %v", err))
+		if !talkRefused(err) {
+			s.device.ResetIfCurrent(client, fmt.Sprintf("talk restart error: %v", err))
+		}
 		return nil // Drop audio quietly
 	}
 
@@ -834,7 +858,9 @@ func (m *cameraDevice) StartTalk(ctx context.Context, channel uint8) (*resilient
 
 	session, err := client.StartTalk(ctx, channel)
 	if err != nil {
-		m.ResetIfCurrent(client, fmt.Sprintf("initial talk start error: %v", err))
+		if !talkRefused(err) {
+			m.ResetIfCurrent(client, fmt.Sprintf("initial talk start error: %v", err))
+		}
 		return nil, err
 	}
 
@@ -846,4 +872,11 @@ func (m *cameraDevice) StartTalk(ctx context.Context, channel uint8) (*resilient
 		samplesPB:  session.SamplesPerBlock(),
 		bytesPB:    session.BytesPerBlock(),
 	}, nil
+}
+
+func talkRefused(err error) bool {
+	// the camera answered, so the shared connection and its streams are fine
+	var statusErr *baichuan.StatusError
+	var unsupported *baichuan.UnsupportedTalkError
+	return errors.As(err, &statusErr) || errors.As(err, &unsupported)
 }

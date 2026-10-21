@@ -387,7 +387,7 @@ func TestWritePacketDropsAMediaTheSessionDoesNotCarry(t *testing.T) {
 	audio := &description.Media{
 		Type:    description.MediaTypeAudio,
 		Control: "trackID=1",
-		Formats: []format.Format{&format.MPEG4Audio{PayloadTyp: 97, Config: &mpeg4audio.AudioSpecificConfig{Type: 2, SampleRate: 16000, ChannelCount: 1}, SizeLength: 13, IndexLength: 3, IndexDeltaLength: 3}},
+		Formats: []format.Format{&format.MPEG4Audio{PayloadTyp: 97, Config: &mpeg4audio.AudioSpecificConfig{Type: 2, SampleRate: 16000, ChannelConfig: 1}, SizeLength: 13, IndexLength: 3, IndexDeltaLength: 3}},
 	}
 
 	if err := handler.setReady(video); err != nil {

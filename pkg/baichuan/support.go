@@ -25,6 +25,8 @@ type ChannelCapabilities struct {
 	Siren bool
 	// Floodlight is true when the camera has a controllable white-light LED.
 	Floodlight bool
+	// Talk is true when the channel has a speaker for two-way audio.
+	Talk bool
 	// Motion is true when the channel reports motion detection.
 	Motion bool
 	// AITypes lists the supported AI detections ("people", "vehicle", "face",
@@ -65,14 +67,15 @@ type xmlSupport struct {
 }
 
 type xmlSupportItem struct {
-	ChnID           int `xml:"chnID"`
-	PTZType         int `xml:"ptzType"`
-	Battery         int `xml:"battery"`
-	DoorbellVersion int `xml:"doorbellVersion"`
-	AudioVersion    int `xml:"audioVersion"`
-	LedCtrl         int `xml:"ledCtrl"`
-	Motion          int `xml:"motion"`
-	AIType          int `xml:"aitype"`
+	ChnID           int  `xml:"chnID"`
+	PTZType         int  `xml:"ptzType"`
+	Battery         int  `xml:"battery"`
+	DoorbellVersion int  `xml:"doorbellVersion"`
+	AudioVersion    int  `xml:"audioVersion"`
+	LedCtrl         int  `xml:"ledCtrl"`
+	IPCAudioTalk    *int `xml:"ipcAudioTalk"`
+	Motion          int  `xml:"motion"`
+	AIType          int  `xml:"aitype"`
 }
 
 // GetSupport queries and decodes the device capability report (msg 199).
@@ -97,13 +100,15 @@ func (c *Client) GetSupport(ctx context.Context) (*Support, error) {
 		ExternStream: raw.NoExternStream == 0,
 	}
 
+	// an NVR's audioTalk describes the recorder, its cameras answer with ipcAudioTalk per item
+	deviceTalk := support.AudioTalk && !c.LoginDeviceInfo().IsNVR()
 	for _, item := range raw.Items {
-		support.Channels = append(support.Channels, decodeChannelCapabilities(item))
+		support.Channels = append(support.Channels, decodeChannelCapabilities(item, deviceTalk))
 	}
 	return support, nil
 }
 
-func decodeChannelCapabilities(item xmlSupportItem) ChannelCapabilities {
+func decodeChannelCapabilities(item xmlSupportItem, deviceTalk bool) ChannelCapabilities {
 	caps := ChannelCapabilities{
 		Channel:  item.ChnID,
 		PTZ:      item.PTZType != 0,
@@ -114,6 +119,11 @@ func decodeChannelCapabilities(item xmlSupportItem) ChannelCapabilities {
 		Siren: (item.AudioVersion>>2)&1 == 1,
 		// ledCtrl bits 1+2 → controllable floodlight.
 		Floodlight: (item.LedCtrl>>1)&1 == 1 && (item.LedCtrl>>2)&1 == 1,
+		// speakerless models still answer TalkAbility and accept one TalkConfig, then refuse talk until reboot
+		Talk: deviceTalk,
+	}
+	if item.IPCAudioTalk != nil {
+		caps.Talk = *item.IPCAudioTalk != 0
 	}
 
 	switch item.PTZType {

@@ -200,13 +200,9 @@ func (h *rtspServerHandler) OnDescribe(ctx *gortsplib.ServerHandlerOnDescribeCtx
 func (h *rtspServerHandler) OnSetup(ctx *gortsplib.ServerHandlerOnSetupCtx) (*base.Response, *gortsplib.ServerStream, error) {
 	if shouldUseTalkSetup(ctx.Session) {
 		if talk := h.getTalk(ctx.Path); talk != nil {
-			desc, err := talk.describe(h.server)
-			if err != nil {
-				h.log.Warnf("RTSP Client SETUP: path=%s (400 Bad Request - talk error: %v)", ctx.Path, err)
-				return &base.Response{StatusCode: base.StatusBadRequest}, nil, err
-			}
 			h.log.Debugf("RTSP Client SETUP: path=%s (200 OK - talk)", ctx.Path)
-			return &base.Response{StatusCode: base.StatusOK}, desc, nil
+			// gortsplib panics when the SETUP of a publisher returns a stream
+			return &base.Response{StatusCode: base.StatusOK}, nil, nil
 		}
 	}
 
@@ -467,10 +463,12 @@ func (h *rtspStreamHandler) setReady(medias ...*description.Media) error {
 		}
 
 		desc := &description.Session{Medias: filtered}
-		h.stream = &gortsplib.ServerStream{Desc: desc, Server: h.server}
-		if err := h.stream.Initialize(); err != nil {
+		stream := &gortsplib.ServerStream{Desc: desc, Server: h.server}
+		if err := stream.Initialize(); err != nil {
+			h.mu.Unlock()
 			return fmt.Errorf("initialize stream: %w", err)
 		}
+		h.stream = stream
 	}
 	mirrors := append([]*rtspStreamHandler(nil), h.mirrors...)
 	h.mu.Unlock()

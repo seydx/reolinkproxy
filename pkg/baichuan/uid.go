@@ -14,6 +14,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -42,6 +43,8 @@ type uidSession struct {
 	recvPackets map[uint32][]byte
 	consumedID  uint32
 	hasConsumed bool
+
+	lastInbound atomic.Int64
 }
 
 // uidWakeTimeout floors the P2P dial: a sleeping battery camera has to wake
@@ -386,6 +389,7 @@ func (s *uidSession) readLoop() {
 		if s.remoteAddr != nil && addr.Port != s.remoteAddr.Port {
 			continue
 		}
+		s.lastInbound.Store(time.Now().UnixNano())
 
 		packet, err := parseUDPPacket(buf[:n])
 		if err != nil {

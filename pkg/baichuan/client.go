@@ -3,6 +3,7 @@ package baichuan
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -236,6 +237,10 @@ func (c *Client) Login(ctx context.Context) error {
 
 	nonce, err := parseNonce(nonceResp.XML)
 	if err != nil {
+		var accountDevice *AccountDeviceError
+		if errors.As(err, &accountDevice) {
+			return err
+		}
 		snippet := nonceResp.XML
 		if len(snippet) > 160 {
 			snippet = snippet[:160]
@@ -384,6 +389,11 @@ func (c *Client) keepAliveLoop() {
 	const maxPingFailures = 3
 	pingFailures := 0
 
+	// the camera acks every keepalive, a UID session that hears nothing for this long is gone
+	const uidSilenceLimit = 15 * time.Second
+	session, _ := c.transport.(*uidSession)
+	startedAt := time.Now().UnixNano()
+
 	for {
 		select {
 		case <-ticker.C:
@@ -393,6 +403,11 @@ func (c *Client) keepAliveLoop() {
 					ChannelID: channelIDHost,
 					Class:     classModernWithOffset,
 				})
+				// a LowPower session starts its keepalive after a silent wait, count from here
+				if session != nil && time.Since(time.Unix(0, max(session.lastInbound.Load(), startedAt))) > uidSilenceLimit {
+					c.shutdown(fmt.Errorf("uid session heard nothing for %v", uidSilenceLimit))
+					return
+				}
 				continue
 			}
 

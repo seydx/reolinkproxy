@@ -33,7 +33,11 @@ type xmlEncodeTable struct {
 		Width  int `xml:"width"`
 		Height int `xml:"height"`
 	} `xml:"resolution"`
-	DefaultFramerate int `xml:"defaultFramerate"`
+	DefaultFramerate int    `xml:"defaultFramerate"`
+	DefaultBitrate   int    `xml:"defaultBitrate"`
+	FramerateTable   string `xml:"framerateTable"`
+	BitrateTable     string `xml:"bitrateTable"`
+	DefaultGop       int    `xml:"defaultGop"`
 }
 
 // StreamProfiles returns the streams a channel offers, ordered main, extern,
@@ -60,9 +64,11 @@ func (c *Client) StreamProfiles(ctx context.Context, channel uint8) ([]StreamPro
 		if info.ChannelBits>>channel&1 != 1 {
 			continue
 		}
+		// some firmwares list a sub stream that is the main stream again, it would pose as the low-resolution source
+		subCopiesMain := info.subCopiesMain()
 		for _, table := range info.EncodeTables {
 			name := profileNameForStreamType(table.Type)
-			if name == "" {
+			if name == "" || name == "sub" && subCopiesMain {
 				continue
 			}
 			candidate := StreamProfile{
@@ -117,6 +123,24 @@ func (c *Client) OccupiedChannels(ctx context.Context) ([]int, error) {
 		}
 	}
 	return channels, nil
+}
+
+func (info xmlStreamInfo) subCopiesMain() bool {
+	var main, sub *xmlEncodeTable
+	for i := range info.EncodeTables {
+		switch info.EncodeTables[i].Type {
+		case "mainStream":
+			main = &info.EncodeTables[i]
+		case "subStream":
+			sub = &info.EncodeTables[i]
+		}
+	}
+	if main == nil || sub == nil {
+		return false
+	}
+	a, b := *main, *sub
+	a.Type, b.Type = "", ""
+	return a == b
 }
 
 func profileNameForStreamType(streamType string) string {

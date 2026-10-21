@@ -126,14 +126,12 @@ func (c *Client) ListenForAlarms(ctx context.Context, channel uint8, callback fu
 		return nil, err
 	}
 
-	// A camera that stays busy is not a camera without events: keep the
-	// receiver and let the caller's renewal retry the subscription, otherwise
-	// one bad moment at startup silences detections until the next restart.
-	// Some models answer 400 forever and push anyway, so the reply says
-	// nothing worth alarming the user about; only pushes failing to arrive
-	// does, and that is reported once the renewals stay unanswered.
+	// keep the receiver whatever the camera answers, the renewal retries:
+	// some models answer 400 forever and push anyway, others refuse with 402
+	// or 405, and failing here resets the shared connection with its streams
 	if err := c.RefreshAlarmSubscription(ctx); err != nil {
-		if !isBusyStatus(err) {
+		var statusErr *StatusError
+		if !errors.As(err, &statusErr) {
 			return nil, err
 		}
 		c.debugf("camera did not accept the event subscription yet (%v), retrying in the background", err)
