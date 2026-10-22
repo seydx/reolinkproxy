@@ -510,10 +510,7 @@ func (u *timestampUnwrapper) unwrap(ts32 uint32) uint64 {
 		if u.nowUnixMicro != nil {
 			nowFn = u.nowUnixMicro
 		}
-		micros := nowFn()
-		if micros < 0 {
-			micros = 0
-		}
+		micros := max(nowFn(), 0)
 		systemMicro := uint64(micros)
 		u.offset = systemMicro - uint64(ts32)
 		u.highest = uint64(ts32)

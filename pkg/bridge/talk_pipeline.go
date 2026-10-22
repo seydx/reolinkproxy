@@ -131,7 +131,7 @@ func (i *rtspTalkInput) decode(pkt *rtp.Packet) ([]int16, error) {
 	}
 
 	out := make([]int16, len(pkt.Payload)/2)
-	for j := 0; j < len(out); j++ {
+	for j := range out {
 		out[j] = int16(binary.BigEndian.Uint16(pkt.Payload[j*2 : j*2+2])) //#nosec G115
 	}
 	return out, nil
@@ -184,10 +184,7 @@ func applyTalkVolume(pcm []int16, percent int) {
 	}
 
 	for i, sample := range pcm {
-		scaled := int64(sample) * int64(percent) / 100
-		if scaled > 32767 {
-			scaled = 32767
-		}
+		scaled := min(int64(sample)*int64(percent)/100, 32767)
 		if scaled < -32768 {
 			scaled = -32768
 		}
@@ -249,12 +246,13 @@ func newTalkbackPipeline(
 }
 
 func (p *talkbackPipeline) run(ctx context.Context, pcmCh <-chan []int16, input *rtspTalkInput, path string) {
+	var retryAt time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case firstPcm := <-pcmCh:
-			if len(firstPcm) == 0 || isSilence(firstPcm) {
+			if len(firstPcm) == 0 || isSilence(firstPcm) || time.Now().Before(retryAt) {
 				continue
 			}
 
@@ -263,6 +261,7 @@ func (p *talkbackPipeline) run(ctx context.Context, pcmCh <-chan []int16, input 
 			cancel()
 			if err != nil {
 				p.log.Warnf("talk start error: %v", err)
+				retryAt = time.Now().Add(talkRetryPause)
 				continue
 			}
 

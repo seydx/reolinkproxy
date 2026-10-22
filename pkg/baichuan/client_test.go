@@ -108,3 +108,28 @@ func TestCloseWhenIdleKeepsAConnectionCarryingTraffic(t *testing.T) {
 	default:
 	}
 }
+
+func TestLoginErrorNamesAccountDevicesAndDeniedLogins(t *testing.T) {
+	t.Parallel()
+
+	var accountDevice *AccountDeviceError
+	if err := loginError(&StatusError{MsgID: 1, Code: 406}, true); !errors.As(err, &accountDevice) {
+		t.Fatalf("a refused sigVer v3 login must be an account device, got %v", err)
+	}
+	if err := loginError(&StatusError{MsgID: 1, Code: 401}, true); errors.As(err, &accountDevice) {
+		t.Fatalf("a wrong password on a sigVer v3 device must stay a login error, got %v", err)
+	}
+	var statusErr *StatusError
+	if err := loginError(&StatusError{MsgID: 1, Code: 406}, false); errors.As(err, &accountDevice) || !errors.As(err, &statusErr) {
+		t.Fatalf("a denied local login must keep its status and not be an account device, got %v", err)
+	}
+}
+
+func TestParseNonceAcceptsSigV3(t *testing.T) {
+	t.Parallel()
+
+	nonce, err := parseNonce(`<body><Encryption version="1.1"><type>md5</type><nonce>abc</nonce><sigVer>v3</sigVer><publicKeyAlgo>X25519</publicKeyAlgo></Encryption></body>`)
+	if err != nil || nonce != "abc" {
+		t.Fatalf("parseNonce() = %q, %v; a local Home Hub announces sigVer v3 and still logs in", nonce, err)
+	}
+}

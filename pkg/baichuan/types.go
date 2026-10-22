@@ -44,6 +44,7 @@ const (
 	msgIDIspGet                   = 26
 	msgIDSnap                     = 109
 	msgIDGetDevInfo               = 80
+	msgIDGetChannelDevInfo        = 318
 	msgIDStreamInfoList           = 146
 	msgIDGetSupport               = 199
 	msgIDWebhookGet               = 806

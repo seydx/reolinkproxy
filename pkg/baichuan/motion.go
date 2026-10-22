@@ -64,45 +64,42 @@ func (s AlarmState) Active() bool {
 	return s.MotionDetected || len(s.AITypes) > 0
 }
 
-// alarmSubscribeRetries covers a camera that is merely busy: right after
-// connecting it also handles the login, two preview starts and the talk setup,
-// and answers the subscription with a 400 until it has caught up. A battery
-// camera needs the same grace to wake.
 const (
-	alarmSubscribeRetries = 3
-	alarmSubscribeBackoff = 1500 * time.Millisecond
+	busyAttempts = 3
+	// a camera still busy after connecting, or a sleeping one woken by the refused request, answers within this
+	busyBackoff = 1500 * time.Millisecond
 )
 
 // RefreshAlarmSubscription (re-)requests the camera's event push. The
 // subscription is host-wide, so it is addressed to the push channel rather than
 // the camera's own channel; NVRs reject it otherwise and never push anything.
 func (c *Client) RefreshAlarmSubscription(ctx context.Context) error {
-	var err error
-	for attempt := range alarmSubscribeRetries {
-		_, err = c.sendRequest(ctx, request{
+	_, err := c.retryWhileBusy(ctx, func() (*Message, error) {
+		return c.sendRequest(ctx, request{
 			MsgID:     msgIDMotionRequest,
 			ChannelID: channelIDPush,
 			Class:     classModernWithOffset,
 		})
-		if err == nil || !isBusyStatus(err) {
-			return err
-		}
-		if attempt == alarmSubscribeRetries-1 {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-c.closed:
-			return err
-		case <-time.After(alarmSubscribeBackoff):
-		}
-	}
+	})
 	return err
 }
 
-// isBusyStatus reports the "not now" answer a camera gives while it is still
-// occupied, as opposed to a command it will never accept.
+func (c *Client) retryWhileBusy(ctx context.Context, send func() (*Message, error)) (*Message, error) {
+	for attempt := 1; ; attempt++ {
+		msg, err := send()
+		if err == nil || !isBusyStatus(err) || attempt == busyAttempts {
+			return msg, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-c.closed:
+			return nil, err
+		case <-time.After(busyBackoff):
+		}
+	}
+}
+
 func isBusyStatus(err error) bool {
 	var statusErr *StatusError
 	return errors.As(err, &statusErr) && statusErr.Code == 400
@@ -130,8 +127,7 @@ func (c *Client) ListenForAlarms(ctx context.Context, channel uint8, callback fu
 	// some models answer 400 forever and push anyway, others refuse with 402
 	// or 405, and failing here resets the shared connection with its streams
 	if err := c.RefreshAlarmSubscription(ctx); err != nil {
-		var statusErr *StatusError
-		if !errors.As(err, &statusErr) {
+		if _, ok := errors.AsType[*StatusError](err); !ok {
 			return nil, err
 		}
 		c.debugf("camera did not accept the event subscription yet (%v), retrying in the background", err)

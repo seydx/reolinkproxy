@@ -42,10 +42,7 @@ func (d *ADPCMDecoder) Decode(data []byte) []int16 {
 	}
 
 	d.predicted = int(int16(binary.LittleEndian.Uint16(data[0:2]))) //#nosec G115
-	d.index = int(data[2])
-	if d.index < 0 {
-		d.index = 0
-	}
+	d.index = max(int(data[2]), 0)
 	if d.index > 88 {
 		d.index = 88
 	}

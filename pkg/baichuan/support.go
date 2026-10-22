@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"strings"
 )
 
 // ChannelCapabilities is the decoded hardware capability set of one channel,
@@ -67,15 +68,16 @@ type xmlSupport struct {
 }
 
 type xmlSupportItem struct {
-	ChnID           int  `xml:"chnID"`
-	PTZType         int  `xml:"ptzType"`
-	Battery         int  `xml:"battery"`
-	DoorbellVersion int  `xml:"doorbellVersion"`
-	AudioVersion    int  `xml:"audioVersion"`
-	LedCtrl         int  `xml:"ledCtrl"`
-	IPCAudioTalk    *int `xml:"ipcAudioTalk"`
-	Motion          int  `xml:"motion"`
-	AIType          int  `xml:"aitype"`
+	ChnID           int    `xml:"chnID"`
+	ChannelType     string `xml:"channelType"`
+	PTZType         int    `xml:"ptzType"`
+	Battery         int    `xml:"battery"`
+	DoorbellVersion int    `xml:"doorbellVersion"`
+	AudioVersion    int    `xml:"audioVersion"`
+	LedCtrl         int    `xml:"ledCtrl"`
+	IPCAudioTalk    *int   `xml:"ipcAudioTalk"`
+	Motion          int    `xml:"motion"`
+	AIType          int    `xml:"aitype"`
 }
 
 // GetSupport queries and decodes the device capability report (msg 199).
@@ -124,6 +126,10 @@ func decodeChannelCapabilities(item xmlSupportItem, deviceTalk bool) ChannelCapa
 	}
 	if item.IPCAudioTalk != nil {
 		caps.Talk = *item.IPCAudioTalk != 0
+	}
+	// a doorbell behind an NVR or Hub can report doorbellVersion 0 and only name its channel type
+	if strings.EqualFold(item.ChannelType, "doorbell") {
+		caps.Doorbell = true
 	}
 
 	switch item.PTZType {

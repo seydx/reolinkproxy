@@ -165,9 +165,6 @@ func parseLoginDeviceInfo(xmlText string) LoginDeviceInfo {
 }
 
 func parseNonce(xmlText string) (string, error) {
-	if xmlElementText(xmlText, "sigVer") == "v3" {
-		return "", &AccountDeviceError{}
-	}
 	var body xmlBody
 	if err := xml.Unmarshal([]byte(xmlText), &body); err != nil {
 		return "", err

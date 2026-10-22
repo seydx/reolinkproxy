@@ -3,6 +3,7 @@ package bridge
 import (
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -520,12 +521,7 @@ func streamCarriesMedia(stream *gortsplib.ServerStream, media *description.Media
 	if stream.Desc == nil {
 		return false
 	}
-	for _, m := range stream.Desc.Medias {
-		if m == media {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(stream.Desc.Medias, media)
 }
 
 type audioPublisher struct {
@@ -901,8 +897,8 @@ func advertisedAuthority(address string, overrideHost string) string {
 	if parsedHost, parsedPort, err := net.SplitHostPort(address); err == nil {
 		host = parsedHost
 		port = parsedPort
-	} else if strings.HasPrefix(address, ":") {
-		port = strings.TrimPrefix(address, ":")
+	} else if after, ok := strings.CutPrefix(address, ":"); ok {
+		port = after
 	} else {
 		host = address
 	}

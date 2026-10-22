@@ -100,3 +100,19 @@ func TestADPCMEncoderRoundTripBlock(t *testing.T) {
 		t.Fatalf("average reconstruction error = %d, want <= 2500", avgError)
 	}
 }
+
+func TestDefaultTalkConfigPrefersFullDuplexAndFollowVideoStream(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := defaultTalkConfig(0, &TalkAbility{
+		DuplexList:          []talkDuplexOption{{Duplex: "HDX"}, {Duplex: "FDX"}},
+		AudioStreamModeList: []talkAudioStreamMode{{AudioStreamMode: "mixAudioStream"}, {AudioStreamMode: "followVideoStream"}},
+		AudioConfigList:     []talkAudioConfigOption{{AudioConfig: TalkAudioConfig{AudioType: "adpcm", SampleRate: 16000, LengthPerEncode: 1024}}},
+	})
+	if err != nil {
+		t.Fatalf("defaultTalkConfig() error = %v", err)
+	}
+	if cfg.Duplex != "FDX" || cfg.AudioStreamMode != "followVideoStream" {
+		t.Fatalf("got duplex %q mode %q, want FDX followVideoStream", cfg.Duplex, cfg.AudioStreamMode)
+	}
+}

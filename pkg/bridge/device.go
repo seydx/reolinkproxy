@@ -23,6 +23,9 @@ const (
 	previewRejectedPauseMax = time.Minute
 )
 
+// a camera has one talk slot, a restart per audio block would keep it busy for every client
+const talkRetryPause = 3 * time.Second
+
 type cameraDevice struct {
 	cameraName string
 	cfg        baichuan.Config
@@ -45,6 +48,8 @@ type cameraDevice struct {
 	// webhookFailed latches after the camera rejected the webhook
 	// subscription (unsupported firmware) so it is not retried on every reconnect.
 	webhookFailed atomic.Bool
+	// foreignWebhookWarned keeps the takeover of another app's push address to one warning per run
+	foreignWebhookWarned atomic.Bool
 
 	// onConnect, when set, prepares every freshly logged-in client the same
 	// way the first one was.
@@ -330,8 +335,7 @@ func (m *cameraDevice) StreamPackets(ctx context.Context, channel uint8, stream 
 				// profile the model lacks. The client is shared with the other
 				// streams and the event listener, so don't reset it, retry this
 				// stream with a growing pause.
-				var statusErr *baichuan.StatusError
-				if errors.As(err, &statusErr) {
+				if _, ok := errors.AsType[*baichuan.StatusError](err); ok {
 					if rejectedPause == 0 {
 						m.log.Warnf("stream %s channel %d rejected by camera (%v), retrying", m.cameraName, channel, err)
 					}
@@ -731,8 +735,7 @@ func (m *cameraDevice) setupWebhookAndBatteryPoll(ctx context.Context, client *b
 	if handlers.webhookURL != "" && !m.webhookFailed.Load() {
 		if err := m.subscribeWebhook(ctx, client, handlers.webhookURL); err != nil {
 			webhookErr = err
-			var statusErr *baichuan.StatusError
-			if errors.As(err, &statusErr) {
+			if _, ok := errors.AsType[*baichuan.StatusError](err); ok {
 				m.log.Warnf("events: camera %s does not support webhooks: %v", m.cameraName, err)
 				m.webhookFailed.Store(true)
 			} else {
@@ -757,8 +760,16 @@ func (m *cameraDevice) setupWebhookAndBatteryPoll(ctx context.Context, client *b
 // subscribeWebhook enables the camera's event push webhook, verifying the
 // registered URL like reolink_aio does.
 func (m *cameraDevice) subscribeWebhook(ctx context.Context, client *baichuan.Client, url string) error {
-	if _, _, err := client.GetWebhook(ctx); err != nil {
+	enabled, current, err := client.GetWebhook(ctx)
+	if err != nil {
 		return err
+	}
+	if enabled && current == url {
+		m.log.Infof("events: camera %s pushes events to %s", m.cameraName, url)
+		return nil
+	}
+	if enabled && current != "" && !m.foreignWebhookWarned.Swap(true) {
+		m.log.Warnf("events: camera %s pushed its events to %s, camera.ui takes that over; the camera has one push address, so that app stops getting events", m.cameraName, current)
 	}
 	if err := client.SetWebhook(ctx, true, url); err != nil {
 		return err
@@ -784,6 +795,7 @@ type resilientTalkSession struct {
 	samplesPB  int
 	bytesPB    int
 	closed     bool
+	retryAt    time.Time
 }
 
 func (s *resilientTalkSession) SampleRate() int {
@@ -817,7 +829,11 @@ func (s *resilientTalkSession) WriteADPCMBlock(ctx context.Context, block []byte
 		s.session = nil
 	}
 
-	// Try to reconnect once
+	if time.Now().Before(s.retryAt) {
+		return nil
+	}
+	s.retryAt = time.Now().Add(talkRetryPause)
+
 	client, err := s.device.Ensure(ctx)
 	if err != nil {
 		return nil // Drop audio quietly while reconnecting

@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/shareed2k/reolinkproxy/pkg/baichuan"
@@ -38,7 +39,13 @@ func (c *Camera) Snapshot(ctx context.Context) ([]byte, error) {
 // SetSiren switches the camera siren on or off.
 func (c *Camera) SetSiren(ctx context.Context, on bool) error {
 	return c.device.WithClient(ctx, func(client *baichuan.Client) error {
-		return client.Siren(ctx, c.channel(), boolToInt(on))
+		err := client.Siren(ctx, c.channel(), boolToInt(on))
+		var statusErr *baichuan.StatusError
+		if on && errors.As(err, &statusErr) {
+			// some firmwares refuse the continuous siren and only sound it a number of times
+			return client.SirenTimes(ctx, c.channel(), 2)
+		}
+		return err
 	})
 }
 

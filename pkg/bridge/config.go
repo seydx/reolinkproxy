@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -137,12 +138,7 @@ func normalizeProfileName(raw string) string {
 
 func (c *CameraConfig) hasStream(name string) bool {
 	name = normalizeProfileName(name)
-	for _, stream := range c.Streams {
-		if stream == name {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(c.Streams, name)
 }
 
 func (c *CameraConfig) preferredTalkProfile() string {

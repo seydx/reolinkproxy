@@ -45,8 +45,7 @@ func TestSessionEndsOnTheFirstPush(t *testing.T) {
 	t.Parallel()
 
 	device := testDevice()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	sessionCtx, endSession := context.WithCancel(ctx)
 	go device.endSessionWhenReachable(sessionCtx, endSession)
@@ -108,7 +107,7 @@ func TestFrequentUIDReconnectsDoNotResetTheReprobeClock(t *testing.T) {
 	stamped := device.preferUIDSince
 
 	// reconnecting over UID while already preferring it must not push the clock
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		device.noteTransportLocked(true)
 	}
 	if !device.preferUIDSince.Equal(stamped) {

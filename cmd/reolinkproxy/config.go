@@ -38,8 +38,8 @@ type envCameraConfig struct {
 
 var (
 	cameraEnvKeyRE   = regexp.MustCompile(`^REOLINK_CAMERA_(\d+)_([A-Z0-9_]+)$`)
-	cameraConfigType = reflect.TypeOf(envCameraConfig{})
-	durationType     = reflect.TypeOf(time.Duration(0))
+	cameraConfigType = reflect.TypeFor[envCameraConfig]()
+	durationType     = reflect.TypeFor[time.Duration]()
 )
 
 func loadCamerasFromEnv() ([]bridge.CameraConfig, error) {
@@ -146,7 +146,7 @@ func cameraEnvFieldIndexes() map[string]int {
 	out := make(map[string]int, cameraConfigType.NumField())
 
 	for i := range cameraConfigType.NumField() {
-		tag := strings.Split(cameraConfigType.Field(i).Tag.Get("yaml"), ",")[0]
+		tag, _, _ := strings.Cut(cameraConfigType.Field(i).Tag.Get("yaml"), ",")
 		if tag == "" || tag == "-" {
 			continue
 		}

@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"encoding/xml"
 	"fmt"
-	"sort"
+	"slices"
 )
 
 const (
@@ -190,7 +190,7 @@ func udpCRC32(buf []byte) uint32 {
 	var crc uint32
 	for _, b := range buf {
 		crc ^= uint32(b)
-		for i := 0; i < 8; i++ {
+		for range 8 {
 			if crc&1 != 0 {
 				crc = (crc >> 1) ^ poly
 			} else {
@@ -243,7 +243,7 @@ func ackWindow(store map[uint32][]byte, consumed uint32, hasConsumed bool) (uint
 	if len(keys) == 0 {
 		return start, nil, true
 	}
-	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	slices.Sort(keys)
 	end := keys[len(keys)-1]
 
 	if end < start {

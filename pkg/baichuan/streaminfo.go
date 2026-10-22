@@ -117,7 +117,7 @@ func (c *Client) OccupiedChannels(ctx context.Context) ([]int, error) {
 	}
 
 	var channels []int
-	for ch := 0; ch < 64; ch++ {
+	for ch := range 64 {
 		if mask>>ch&1 == 1 {
 			channels = append(channels, ch)
 		}

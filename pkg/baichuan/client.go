@@ -237,10 +237,6 @@ func (c *Client) Login(ctx context.Context) error {
 
 	nonce, err := parseNonce(nonceResp.XML)
 	if err != nil {
-		var accountDevice *AccountDeviceError
-		if errors.As(err, &accountDevice) {
-			return err
-		}
 		snippet := nonceResp.XML
 		if len(snippet) > 160 {
 			snippet = snippet[:160]
@@ -276,7 +272,8 @@ func (c *Client) Login(ctx context.Context) error {
 		ForceBC:   !loginPlain,
 	})
 	if err != nil {
-		return fmt.Errorf("login failed: %w", err)
+		// account devices announce sigVer v3, so do local Home Hubs that still accept this login
+		return loginError(err, xmlElementText(nonceResp.XML, "sigVer") == "v3")
 	}
 
 	c.stateMu.Lock()
@@ -525,9 +522,7 @@ func (c *Client) StartPreview(ctx context.Context, channel uint8, stream Stream)
 		})
 	}
 
-	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
+	c.wg.Go(func() {
 		defer unsubscribe()
 		defer close(packets)
 
@@ -578,7 +573,7 @@ func (c *Client) StartPreview(ctx context.Context, channel uint8, stream Stream)
 				}
 			}
 		}
-	}()
+	})
 
 	return reader, nil
 }
@@ -722,4 +717,17 @@ func streamParams(stream Stream) (uint8, uint32) {
 	default:
 		return 0, 0
 	}
+}
+
+func loginError(err error, sigV3 bool) error {
+	var statusErr *StatusError
+	if errors.As(err, &statusErr) && statusErr.Code != 401 {
+		if sigV3 {
+			return &AccountDeviceError{}
+		}
+		if statusErr.Code == 406 {
+			return fmt.Errorf("the camera denied the local login, adding it again in the Reolink app usually restores it: %w", err)
+		}
+	}
+	return fmt.Errorf("login failed: %w", err)
 }

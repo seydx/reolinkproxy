@@ -325,10 +325,7 @@ func (s *uidSession) Write(p []byte) (int, error) {
 
 	written := 0
 	for len(p) > 0 {
-		chunkLen := len(p)
-		if chunkLen > maxPayload {
-			chunkLen = maxPayload
-		}
+		chunkLen := min(len(p), maxPayload)
 
 		chunk := append([]byte(nil), p[:chunkLen]...)
 		select {

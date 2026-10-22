@@ -163,6 +163,8 @@ func (c *Camera) handleWebhookPush(body []byte) {
 	switch push.Data["event"] {
 	case "sleep":
 		c.handleSleep(true)
+		// a battery camera pushes no end of its events, so its sleep ends them and re-arms the doorbell
+		c.handleAlarm(baichuan.AlarmState{})
 	case "wake":
 		c.handleSleep(false)
 		switch push.Data["reason"] {

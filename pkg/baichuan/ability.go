@@ -178,7 +178,7 @@ func parseAbilityInfo(xmlText string, channel uint8) (map[string]abilityAccess, 
 }
 
 func mergeAbilities(dst map[string]abilityAccess, raw string) {
-	for _, token := range strings.Split(raw, ",") {
+	for token := range strings.SplitSeq(raw, ",") {
 		token = strings.TrimSpace(token)
 		if token == "" {
 			continue

@@ -7,7 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
+
+// the camera plays about a second behind and drops what it still holds on TalkReset
+const talkPlayoutMargin = 1500 * time.Millisecond
 
 // UnsupportedTalkError reports that the camera does not expose a usable talkback profile.
 type UnsupportedTalkError struct {
@@ -83,10 +87,12 @@ type TalkSession struct {
 	sampleRate      int
 	samplesPerBlock int
 	bytesPerBlock   int
+	blockDuration   time.Duration
 	mu              sync.Mutex
 	closed          bool
 	closeOnce       sync.Once
 	seq             uint16
+	playoutEnd      time.Time
 }
 
 // SampleRate returns the audio sample rate required by the camera.
@@ -127,16 +133,31 @@ func (s *TalkSession) WriteADPCMBlock(_ context.Context, block []byte) error {
 		Body:      payload,
 		Binary:    true,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	if now := time.Now(); s.playoutEnd.Before(now) {
+		s.playoutEnd = now
+	}
+	s.playoutEnd = s.playoutEnd.Add(s.blockDuration)
+	return nil
 }
 
-// Close stops the active talkback session.
+// Close stops the active talkback session once the camera has played what it
+// was sent.
 func (s *TalkSession) Close(ctx context.Context) error {
 	var err error
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
 		s.closed = true
+		wait := time.Until(s.playoutEnd.Add(talkPlayoutMargin))
 		s.mu.Unlock()
+		if wait > 0 {
+			select {
+			case <-ctx.Done():
+			case <-time.After(wait):
+			}
+		}
 		err = s.client.stopTalk(ctx, s.channel)
 	})
 	return err
@@ -179,6 +200,7 @@ func (c *Client) StartTalk(ctx context.Context, channel uint8) (*TalkSession, er
 		sampleRate:      int(cfg.AudioConfig.SampleRate),
 		samplesPerBlock: samplesPerBlock,
 		bytesPerBlock:   bytesPerBlock,
+		blockDuration:   time.Duration(samplesPerBlock) * time.Second / time.Duration(cfg.AudioConfig.SampleRate),
 	}, nil
 }
 
@@ -195,8 +217,7 @@ func (c *Client) getTalkAbility(ctx context.Context, channel uint8) (*TalkAbilit
 		Extension: extension,
 	})
 	if err != nil {
-		var statusErr *StatusError
-		if errors.As(err, &statusErr) {
+		if statusErr, ok := errors.AsType[*StatusError](err); ok {
 			return nil, &UnsupportedTalkError{Reason: fmt.Sprintf("status %d from talk ability", statusErr.Code)}
 		}
 		return nil, err
@@ -239,16 +260,17 @@ func defaultTalkConfig(channel uint8, ability *TalkAbility) (TalkConfig, error) 
 
 		duplex := ability.DuplexList[0].Duplex
 		for _, d := range ability.DuplexList {
-			if d.Duplex == "fullDuplex" {
-				duplex = "fullDuplex"
+			if d.Duplex == "FDX" {
+				duplex = d.Duplex
 				break
 			}
 		}
 
+		// the Reolink app picks followVideoStream whenever the camera offers it
 		audioMode := ability.AudioStreamModeList[0].AudioStreamMode
 		for _, m := range ability.AudioStreamModeList {
-			if m.AudioStreamMode == "speaker" {
-				audioMode = "speaker"
+			if m.AudioStreamMode == "followVideoStream" {
+				audioMode = m.AudioStreamMode
 				break
 			}
 		}
@@ -288,7 +310,8 @@ func (c *Client) startTalkSession(ctx context.Context, channel uint8, cfg TalkCo
 	if err != nil {
 		return err
 	}
-	if resp.Header.ResponseCode == 422 {
+	// 421 and 422 both mean a talk session is still open, possibly our own leftover
+	if resp.Header.ResponseCode == 421 || resp.Header.ResponseCode == 422 {
 		if err := c.stopTalk(ctx, channel); err != nil {
 			return err
 		}
@@ -300,8 +323,7 @@ func (c *Client) startTalkSession(ctx context.Context, channel uint8, cfg TalkCo
 	}
 
 	if err := resp.success(); err != nil {
-		var statusErr *StatusError
-		if errors.As(err, &statusErr) {
+		if statusErr, ok := errors.AsType[*StatusError](err); ok {
 			return &UnsupportedTalkError{Reason: fmt.Sprintf("talk config rejected with status %d", statusErr.Code)}
 		}
 		return err

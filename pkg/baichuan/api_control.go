@@ -32,22 +32,15 @@ func (c *Client) exec(ctx context.Context, msgID uint32, headerChannel uint8, ex
 		}
 	}
 
-	resp, err := c.sendRequest(ctx, request{
-		MsgID:     msgID,
-		ChannelID: headerChannel,
-		Class:     classModernWithOffset,
-		Extension: extension,
-		Body:      bodyBytes,
+	return c.retryWhileBusy(ctx, func() (*Message, error) {
+		return c.sendRequest(ctx, request{
+			MsgID:     msgID,
+			ChannelID: headerChannel,
+			Class:     classModernWithOffset,
+			Extension: extension,
+			Body:      bodyBytes,
+		})
 	})
-	if err != nil {
-		return nil, err
-	}
-
-	if err := resp.success(); err != nil {
-		return nil, err
-	}
-
-	return resp, nil
 }
 
 // Siren triggers the camera's internal siren alarm to sound continuously (manual mode).
@@ -86,24 +79,10 @@ func (c *Client) SirenHubTimes(ctx context.Context, times int) error {
 // floodlight control (msg 288; msg 290 is the scheduled-tasks config and
 // rejects direct switching).
 func (c *Client) SetWhiteLed(ctx context.Context, channel uint8, status int) error {
-	body, err := marshalXMLDocument(xmlFloodlightManualBody{
-		FloodlightManual: xmlFloodlightManual{Version: "1", ChannelID: channel, Status: status, Duration: 180},
+	_, err := c.execCommand(ctx, msgIDFloodlightManual, channel, xmlFloodlightManualBody{
+		FloodlightManual: xmlFloodlightManual{Version: "1.1", ChannelID: channel, Status: status, Duration: 180},
 	})
-	if err != nil {
-		return fmt.Errorf("marshal xml: %w", err)
-	}
-
-	resp, err := c.sendRequest(ctx, request{
-		MsgID:     msgIDFloodlightManual,
-		ChannelID: channel,
-		Class:     classModernWithOffset,
-		Extension: channelExtension(channel),
-		Body:      body,
-	})
-	if err != nil {
-		return err
-	}
-	return resp.success()
+	return err
 }
 
 // GetWhiteLed retrieves the current state of the floodlight.
@@ -311,6 +290,28 @@ func (c *Client) GetDevInfo(ctx context.Context) (*DevInfo, error) {
 	}
 	if info == nil {
 		return nil, fmt.Errorf("no DevInfo in response")
+	}
+	return info, nil
+}
+
+// GetChannelDevInfo retrieves the device information of a camera behind an
+// NVR or Hub (msg 318), where msg 80 describes the recorder itself.
+func (c *Client) GetChannelDevInfo(ctx context.Context, channel uint8) (*DevInfo, error) {
+	resp, err := c.execCommand(ctx, msgIDGetChannelDevInfo, channel, nil)
+	if err != nil {
+		return nil, err
+	}
+	// read the fields wherever they sit, the root element is not known for every firmware
+	info := &DevInfo{
+		Name:            xmlElementText(resp.XML, "name"),
+		Type:            xmlElementText(resp.XML, "type"),
+		SerialNumber:    xmlElementText(resp.XML, "serialNumber"),
+		HardwareVersion: xmlElementText(resp.XML, "hardwareVersion"),
+		FirmwareVersion: xmlElementText(resp.XML, "firmwareVersion"),
+		ItemNo:          xmlElementText(resp.XML, "itemNo"),
+	}
+	if info.Type == "" && info.SerialNumber == "" {
+		return nil, fmt.Errorf("no device info in response")
 	}
 	return info, nil
 }
