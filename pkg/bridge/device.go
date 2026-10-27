@@ -528,6 +528,11 @@ func (m *cameraDevice) watchLowPower(ctx context.Context, channel uint8, handler
 			continue
 		}
 
+		if client.LoginDeviceInfo().IsNVR() {
+			m.watchEventsLoop(ctx, channel, handlers)
+			return
+		}
+
 		err = m.setupWebhookAndBatteryPoll(ctx, client, channel, handlers)
 
 		if m.webhookFailed.Load() {
@@ -605,6 +610,11 @@ func (m *cameraDevice) watchEventsLoop(ctx context.Context, channel uint8, handl
 		// a session that has to stay open needs the pings to notice a dead
 		// link, even on a camera Login left silent
 		client.StartKeepAlive()
+
+		if client.LoginDeviceInfo().IsNVR() {
+			// a Hub or NVR stays awake and pushes for the battery cameras behind it, its one push address is not ours to take
+			handlers.letSleep, handlers.webhookURL = false, ""
+		}
 
 		cancelAlarms, alarmsOK := m.setupAlarmListener(ctx, client, channel, handlers, &motionUnsupported)
 		if !alarmsOK {

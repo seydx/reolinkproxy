@@ -345,9 +345,26 @@ func (s *uidSession) Write(p []byte) (int, error) {
 }
 
 func (s *uidSession) Close() error {
+	// without it the camera stays awake until its own session timeout
+	s.sendDisconnect()
 	s.shutdown(io.EOF)
 	s.wg.Wait()
 	return nil
+}
+
+func (s *uidSession) sendDisconnect() {
+	xmlPayload, err := marshalUDPXML(udpP2PEnvelope{
+		C2DDisc: &udpDisconnect{CID: s.clientID, DID: s.cameraID},
+	})
+	if err != nil {
+		return
+	}
+	tid := uint32(randomUint8())
+	packet, err := marshalUDPPacket(udpDiscoveryPacket{TID: tid, Payload: UDPXOR(tid, xmlPayload)})
+	if err != nil {
+		return
+	}
+	_, _ = s.conn.WriteToUDP(packet, s.remoteAddr)
 }
 
 func (s *uidSession) shutdown(err error) {

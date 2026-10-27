@@ -249,8 +249,9 @@ func ackWindow(store map[uint32][]byte, consumed uint32, hasConsumed bool) (uint
 	if end < start {
 		return start, nil, true
 	}
-	if end-start > 1024 {
-		end = start + 1024
+	// some cameras drop the session once the bitmap reaches about 205 bytes
+	if end-start > 200 {
+		end = start + 200
 	}
 
 	payload := make([]byte, 0, end-start)

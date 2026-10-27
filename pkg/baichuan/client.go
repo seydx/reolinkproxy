@@ -158,6 +158,12 @@ func (c *Client) readLoop() {
 			c.shutdown(err)
 			return
 		}
+		if msg.Header.MsgID == msgIDUDPKeepAlive && msg.Header.ResponseCode == 0 {
+			// a battery camera ends the session about 10 s after an unanswered
+			// keepalive; it is no traffic of ours, so an idle camera still sleeps
+			go c.answerKeepAlive(msg.Header)
+			continue
+		}
 		c.lastRead.Store(time.Now().UnixNano())
 		c.dispatch(msg)
 	}
@@ -235,8 +241,13 @@ func (c *Client) Login(ctx context.Context) error {
 		return fmt.Errorf("request nonce: %w", err)
 	}
 
+	// account devices announce sigVer v3, so do local Home Hubs that still accept this login
+	sigV3 := xmlElementText(nonceResp.XML, "sigVer") == "v3"
 	nonce, err := parseNonce(nonceResp.XML)
 	if err != nil {
+		if sigV3 {
+			return &AccountDeviceError{}
+		}
 		snippet := nonceResp.XML
 		if len(snippet) > 160 {
 			snippet = snippet[:160]
@@ -272,8 +283,7 @@ func (c *Client) Login(ctx context.Context) error {
 		ForceBC:   !loginPlain,
 	})
 	if err != nil {
-		// account devices announce sigVer v3, so do local Home Hubs that still accept this login
-		return loginError(err, xmlElementText(nonceResp.XML, "sigVer") == "v3")
+		return loginError(err, sigV3)
 	}
 
 	c.stateMu.Lock()
@@ -659,12 +669,25 @@ func (c *Client) sendNoReply(req request) error {
 }
 
 func (c *Client) writeRequest(req request) error {
-	payload := c.encodeRequest(req)
+	err := c.write(c.encodeRequest(req))
+	c.lastSend.Store(time.Now().UnixNano())
+	return err
+}
 
+func (c *Client) answerKeepAlive(in Header) {
+	_ = c.write(c.encodeRequest(request{
+		MsgID:        msgIDUDPKeepAlive,
+		ChannelID:    in.ChannelID,
+		MsgNum:       in.MsgNum,
+		Class:        classModernWithOffset,
+		ResponseCode: 200,
+	}))
+}
+
+func (c *Client) write(payload []byte) error {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 	_, err := c.transport.Write(payload)
-	c.lastSend.Store(time.Now().UnixNano())
 	return err
 }
 

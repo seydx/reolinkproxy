@@ -170,10 +170,11 @@ func (c *Client) ListenForAlarms(ctx context.Context, channel uint8, callback fu
 				case res.matched:
 					c.debugf("alarm push channel %d: motion=%t visitor=%t ai=%v", channel, res.state.MotionDetected, res.state.Visitor, res.state.AITypes)
 					callback(res.state)
-				case res.hasEvent:
+				case res.hasEvent && !c.LoginDeviceInfo().IsNVR():
 					// the camera reports alarms, just not for the channel this
 					// camera was adopted as; silently dropping them looks like
-					// a camera that never detects anything
+					// a camera that never detects anything. A recorder pushes
+					// every channel's alarms on each connection.
 					c.foreignAlarmOnce.Do(func() {
 						c.warnf("camera pushes alarm events for channel(s) %v, this camera listens on channel %d, so its detections stay idle", res.channels, channel)
 					})

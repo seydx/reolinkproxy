@@ -9,15 +9,16 @@ import (
 )
 
 type request struct {
-	MsgID      uint32
-	ChannelID  uint8
-	StreamType uint8
-	Class      uint16
-	MsgNum     uint16
-	Extension  []byte
-	Body       []byte
-	Binary     bool
-	ForceBC    bool
+	MsgID        uint32
+	ChannelID    uint8
+	StreamType   uint8
+	Class        uint16
+	MsgNum       uint16
+	ResponseCode uint16
+	Extension    []byte
+	Body         []byte
+	Binary       bool
+	ForceBC      bool
 }
 
 type pendingKey struct {
@@ -213,7 +214,7 @@ func (c *Client) encodeRequest(req request) []byte {
 	packet[13] = req.StreamType
 	binary.LittleEndian.PutUint16(packet[14:16], req.MsgNum)
 
-	responseCode := uint16(0)
+	responseCode := req.ResponseCode
 	if req.Class == classLegacy && req.MsgID == msgIDLogin && len(body) == 0 {
 		// Header-only legacy login is the nonce request and uses the special marker
 		// seen in the official client / reolink_aio implementation.
