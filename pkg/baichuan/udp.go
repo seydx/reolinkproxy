@@ -45,8 +45,9 @@ type udpP2PEnvelope struct {
 	C2DS    *udpC2DS       `xml:"C2D_S,omitempty"`
 	C2DC    *udpC2DC       `xml:"C2D_C,omitempty"`
 	D2CCR   *udpD2CCR      `xml:"D2C_C_R,omitempty"`
-	C2DDisc *udpDisconnect `xml:"C2D_DISC,omitempty"`
-	D2CDisc *udpDisconnect `xml:"D2C_DISC,omitempty"`
+	C2DHB   *udpSessionIDs `xml:"C2D_HB,omitempty"`
+	C2DDisc *udpSessionIDs `xml:"C2D_DISC,omitempty"`
+	D2CDisc *udpSessionIDs `xml:"D2C_DISC,omitempty"`
 }
 
 // udpC2DS asks the device on the other end for its UID, so a camera known
@@ -73,7 +74,7 @@ type udpD2CCR struct {
 	DID int32 `xml:"did"`
 }
 
-type udpDisconnect struct {
+type udpSessionIDs struct {
 	CID int32 `xml:"cid"`
 	DID int32 `xml:"did"`
 }

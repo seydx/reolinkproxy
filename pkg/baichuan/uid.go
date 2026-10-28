@@ -346,16 +346,14 @@ func (s *uidSession) Write(p []byte) (int, error) {
 
 func (s *uidSession) Close() error {
 	// without it the camera stays awake until its own session timeout
-	s.sendDisconnect()
+	s.sendControl(&udpP2PEnvelope{C2DDisc: &udpSessionIDs{CID: s.clientID, DID: s.cameraID}})
 	s.shutdown(io.EOF)
 	s.wg.Wait()
 	return nil
 }
 
-func (s *uidSession) sendDisconnect() {
-	xmlPayload, err := marshalUDPXML(udpP2PEnvelope{
-		C2DDisc: &udpDisconnect{CID: s.clientID, DID: s.cameraID},
-	})
+func (s *uidSession) sendControl(envelope *udpP2PEnvelope) {
+	xmlPayload, err := marshalUDPXML(envelope)
 	if err != nil {
 		return
 	}
@@ -473,6 +471,9 @@ func (s *uidSession) writeLoop() {
 
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
+	// some cameras drop a session that sends no heartbeat
+	heartbeat := time.NewTicker(time.Second)
+	defer heartbeat.Stop()
 
 	for {
 		select {
@@ -512,6 +513,9 @@ func (s *uidSession) writeLoop() {
 			s.sentMu.Lock()
 			s.sentPackets[packetID] = packet
 			s.sentMu.Unlock()
+
+		case <-heartbeat.C:
+			s.sendControl(&udpP2PEnvelope{C2DHB: &udpSessionIDs{CID: s.clientID, DID: s.cameraID}})
 
 		case <-ticker.C:
 			s.sentMu.Lock()

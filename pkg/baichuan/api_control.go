@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"strings"
 )
 
 // execCommand sends a channel-scoped XML command: header channel is 1-based
@@ -101,6 +102,11 @@ func (c *Client) SetPrivacyMode(ctx context.Context, channel uint8, enable int) 
 // GetPrivacyMode retrieves the current privacy/sleep mode state.
 func (c *Client) GetPrivacyMode(ctx context.Context, channel uint8) (*Message, error) {
 	return c.execCommand(ctx, msgIDPrivacyModeGet, channel, nil)
+}
+
+// ListenForPrivacy reports the channel's privacy mode on every change the camera pushes.
+func (c *Client) ListenForPrivacy(ctx context.Context, channel uint8, callback func(on bool)) func() {
+	return c.listenForStates(ctx, msgIDPrivacyModePush, parsePrivacyStates, channel, callback)
 }
 
 // SetAutoFocus enables or disables auto-focus on supported cameras.
@@ -333,4 +339,31 @@ func (c *Client) GetBattery(ctx context.Context, channel uint8) (*BatteryInfo, e
 	}
 
 	return payload.BatteryInfo, nil
+}
+
+func parsePrivacyStates(xmlText string) map[int]bool {
+	states := make(map[int]bool)
+	dec := xml.NewDecoder(strings.NewReader(xmlText))
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		start, ok := tok.(xml.StartElement)
+		if !ok || start.Name.Local != "status" {
+			continue
+		}
+		var item struct {
+			ChannelID int `xml:"channelId"`
+			Sleep     int `xml:"sleep"`
+		}
+		if dec.DecodeElement(&item, &start) == nil {
+			states[item.ChannelID] = item.Sleep == 1
+		}
+	}
+	// a single camera pushes a bare sleepStatus without a channel
+	if sleep := xmlElementText(xmlText, "sleep"); len(states) == 0 && sleep != "" {
+		states[0] = sleep == "1"
+	}
+	return states
 }

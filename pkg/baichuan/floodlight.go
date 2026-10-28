@@ -3,7 +3,6 @@ package baichuan
 import (
 	"context"
 	"encoding/xml"
-	"sync"
 )
 
 type xmlFloodlightStatusBody struct {
@@ -35,35 +34,5 @@ func ParseFloodlightStates(xmlText string) map[int]bool {
 // channel's spotlight state. The camera pushes its current state shortly after
 // login and on every change, including changes it made itself.
 func (c *Client) ListenForFloodlight(ctx context.Context, channel uint8, callback func(on bool)) func() {
-	sub, unsubscribe := c.Subscribe(msgIDFloodlightStatus)
-	stop := make(chan struct{})
-
-	go func() {
-		defer unsubscribe()
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-c.closed:
-				return
-			case <-stop:
-				return
-			case msg := <-sub:
-				if msg == nil {
-					continue
-				}
-				if on, ok := ParseFloodlightStates(msg.XML)[int(channel)]; ok {
-					callback(on)
-				}
-			}
-		}
-	}()
-
-	var stopOnce sync.Once
-	return func() {
-		stopOnce.Do(func() {
-			close(stop)
-		})
-	}
+	return c.listenForStates(ctx, msgIDFloodlightStatus, ParseFloodlightStates, channel, callback)
 }

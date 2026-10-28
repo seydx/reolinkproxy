@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
-	"sync"
 )
 
 // Webhook support (battery cameras): instead of a persistent TCP event
@@ -105,37 +104,7 @@ func ParseBatteryXML(xmlText string) []BatteryInfo {
 // ListenForSleep subscribes to channel-info pushes (msg 145) and invokes the
 // callback with the channel's sleep state on each update.
 func (c *Client) ListenForSleep(ctx context.Context, channel uint8, callback func(sleeping bool)) func() {
-	sub, unsubscribe := c.Subscribe(msgIDChannelInfoList)
-	stop := make(chan struct{})
-
-	go func() {
-		defer unsubscribe()
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-c.closed:
-				return
-			case <-stop:
-				return
-			case msg := <-sub:
-				if msg == nil {
-					continue
-				}
-				if sleeping, ok := ParseSleepStates(msg.XML)[int(channel)]; ok {
-					callback(sleeping)
-				}
-			}
-		}
-	}()
-
-	var stopOnce sync.Once
-	return func() {
-		stopOnce.Do(func() {
-			close(stop)
-		})
-	}
+	return c.listenForStates(ctx, msgIDChannelInfoList, ParseSleepStates, channel, callback)
 }
 
 type xmlChannelInfoListBody struct {

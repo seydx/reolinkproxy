@@ -51,6 +51,10 @@ type cameraDevice struct {
 	// foreignWebhookWarned keeps the takeover of another app's push address to one warning per run
 	foreignWebhookWarned atomic.Bool
 
+	// privacyEnded is closed when the camera leaves privacy mode, nil while the mode is off
+	privacyMu    sync.Mutex
+	privacyEnded chan struct{}
+
 	// onConnect, when set, prepares every freshly logged-in client the same
 	// way the first one was.
 	onConnect func(*baichuan.Client)
@@ -82,6 +86,26 @@ func (m *cameraDevice) audioKnown(stream baichuan.Stream) (bool, bool) {
 	defer m.mu.Unlock()
 	seen, ok := m.audioSeen[stream]
 	return seen, ok
+}
+
+func (m *cameraDevice) setPrivacy(on bool) {
+	m.privacyMu.Lock()
+	defer m.privacyMu.Unlock()
+	switch {
+	case on && m.privacyEnded == nil:
+		m.privacyEnded = make(chan struct{})
+		m.log.Infof("camera %s is in privacy mode, its streams wait until it ends", m.cameraName)
+	case !on && m.privacyEnded != nil:
+		close(m.privacyEnded)
+		m.privacyEnded = nil
+		m.log.Infof("camera %s left privacy mode", m.cameraName)
+	}
+}
+
+func (m *cameraDevice) privacyEnd() <-chan struct{} {
+	m.privacyMu.Lock()
+	defer m.privacyMu.Unlock()
+	return m.privacyEnded
 }
 
 func (m *cameraDevice) setAudioKnown(stream baichuan.Stream, seen bool) {
@@ -335,8 +359,18 @@ func (m *cameraDevice) StreamPackets(ctx context.Context, channel uint8, stream 
 				// profile the model lacks. The client is shared with the other
 				// streams and the event listener, so don't reset it, retry this
 				// stream with a growing pause.
-				if _, ok := errors.AsType[*baichuan.StatusError](err); ok {
-					if rejectedPause == 0 {
+				if statusErr, ok := errors.AsType[*baichuan.StatusError](err); ok {
+					if end := m.privacyEnd(); end != nil {
+						select {
+						case <-ctx.Done():
+							return
+						case <-end:
+						}
+						rejectedPause = 0
+						continue
+					}
+					// 425 is privacy mode, its push can arrive after the first refusal
+					if rejectedPause == 0 && statusErr.Code != 425 {
 						m.log.Warnf("stream %s channel %d rejected by camera (%v), retrying", m.cameraName, channel, err)
 					}
 					rejectedPause = min(max(2*rejectedPause, previewRejectedPauseMin), previewRejectedPauseMax)
@@ -430,6 +464,11 @@ func (m *cameraDevice) pumpPreview(
 			}
 			stallTimer.Reset(15 * time.Second)
 		case <-stallTimer.C:
+			if m.privacyEnd() != nil {
+				// the camera holds a running preview through privacy mode and resumes it after
+				stallTimer.Reset(15 * time.Second)
+				continue
+			}
 			// one silent stream says nothing about the connection: the
 			// keepalive owns that verdict, so only this preview restarts
 			m.log.Warnf("stream %s channel %d stalled for 15s, restarting preview", m.cameraName, channel)
@@ -616,8 +655,12 @@ func (m *cameraDevice) watchEventsLoop(ctx context.Context, channel uint8, handl
 			handlers.letSleep, handlers.webhookURL = false, ""
 		}
 
+		// first, so the mode the camera pushes right after connecting is not missed
+		cancelPrivacy := client.ListenForPrivacy(ctx, channel, m.setPrivacy)
+
 		cancelAlarms, alarmsOK := m.setupAlarmListener(ctx, client, channel, handlers, &motionUnsupported)
 		if !alarmsOK {
+			cancelPrivacy()
 			select {
 			case <-ctx.Done():
 				return
@@ -649,6 +692,7 @@ func (m *cameraDevice) watchEventsLoop(ctx context.Context, channel uint8, handl
 
 		m.runEventSession(ctx, client, handlers, motionUnsupported)
 
+		cancelPrivacy()
 		cancelAlarms()
 		cancelBattery()
 		cancelSleep()

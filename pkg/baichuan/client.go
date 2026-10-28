@@ -158,9 +158,9 @@ func (c *Client) readLoop() {
 			c.shutdown(err)
 			return
 		}
-		if msg.Header.MsgID == msgIDUDPKeepAlive && msg.Header.ResponseCode == 0 {
-			// a battery camera ends the session about 10 s after an unanswered
-			// keepalive; it is no traffic of ours, so an idle camera still sleeps
+		if c.isUDP && msg.Header.MsgID == msgIDUDPKeepAlive {
+			// a battery camera expects its keepalive answered, some firmwares
+			// send it with code 200 already; no traffic of ours, so an idle camera still sleeps
 			go c.answerKeepAlive(msg.Header)
 			continue
 		}
@@ -491,6 +491,40 @@ func (c *Client) subscribe(msgID uint32) (*subscription, func()) {
 	}
 }
 
+func (c *Client) listenForStates(ctx context.Context, msgID uint32, parse func(string) map[int]bool, channel uint8, callback func(bool)) func() {
+	sub, unsubscribe := c.Subscribe(msgID)
+	stop := make(chan struct{})
+
+	go func() {
+		defer unsubscribe()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-c.closed:
+				return
+			case <-stop:
+				return
+			case msg := <-sub:
+				if msg == nil {
+					continue
+				}
+				if state, ok := parse(msg.XML)[int(channel)]; ok {
+					callback(state)
+				}
+			}
+		}
+	}()
+
+	var stopOnce sync.Once
+	return func() {
+		stopOnce.Do(func() {
+			close(stop)
+		})
+	}
+}
+
 // StartPreview starts live media streaming and returns a parsed bcmedia reader.
 func (c *Client) StartPreview(ctx context.Context, channel uint8, stream Stream) (*MediaReader, error) {
 	if err := c.Login(ctx); err != nil {
@@ -678,6 +712,7 @@ func (c *Client) answerKeepAlive(in Header) {
 	_ = c.write(c.encodeRequest(request{
 		MsgID:        msgIDUDPKeepAlive,
 		ChannelID:    in.ChannelID,
+		StreamType:   in.StreamType,
 		MsgNum:       in.MsgNum,
 		Class:        classModernWithOffset,
 		ResponseCode: 200,

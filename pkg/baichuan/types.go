@@ -69,6 +69,7 @@ const (
 	msgIDDingDongSet              = 487
 	msgIDPrivacyModeGet           = 574
 	msgIDPrivacyModeSet           = 575
+	msgIDPrivacyModePush          = 623
 	msgIDPreRecordGet             = 594
 	msgIDPreRecordSet             = 595
 	msgIDSceneGet                 = 601
