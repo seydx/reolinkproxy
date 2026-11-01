@@ -415,10 +415,11 @@ type Camera struct {
 	cancel context.CancelFunc
 	// liveCatchUp is read per frame by the running streams, so a change
 	// applies without restarting them
-	liveCatchUp atomic.Int64
-	paths       []string
-	streams     []*streamMetadata
-	events      cameraEvents
+	liveCatchUp   atomic.Int64
+	paths         []string
+	streams       []*streamMetadata
+	events        cameraEvents
+	webhookAlarms baichuan.AlarmMerger
 }
 
 // Name returns the camera name.

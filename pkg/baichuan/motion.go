@@ -82,6 +82,14 @@ func (s AlarmState) Active() bool {
 	return s.MotionDetected || len(s.AITypes) > 0
 }
 
+// AlarmMerger merges the alarm push of a channel with the YOLO World pushes, in which newer cameras report people, vehicles and bicycles.
+type AlarmMerger struct {
+	mu         sync.Mutex
+	alarm      AlarmState
+	yolo       []string
+	yoloDetail []string
+}
+
 const (
 	busyAttempts = 3
 	// a camera still busy after connecting, or a sleeping one woken by the refused request, answers within this
@@ -166,32 +174,21 @@ func (c *Client) ListenForAlarms(ctx context.Context, channel uint8, callback fu
 		defer unsubscribeYolo()
 		defer unsubscribeYoloDetail()
 
-		// cameras with YOLO World report people, vehicles and bicycles apart from the alarm push
-		var alarm AlarmState
-		var yolo, yoloDetail []string
-		report := func() {
-			state := withAITypes(alarm, yolo, yoloDetail)
+		var alarms AlarmMerger
+		report := func(state AlarmState) {
 			c.debugf("alarm push channel %d: motion=%t visitor=%t ai=%v", channel, state.MotionDetected, state.Visitor, state.AITypes)
 			callback(state)
 		}
-		updateYolo := func(msg *Message, current *[]string, basic bool) {
-			res, err := parseYolo(msg.XML, channel, dualLens)
-			if err != nil {
+		updateYolo := func(msg *Message, cmd int) {
+			// no other push shares the yolo ids, so any of them proves the subscription works
+			c.alarmPushed.Store(true)
+			state, changed, err := alarms.Yolo(cmd, msg.XML, channel, dualLens)
+			switch {
+			case err != nil:
 				c.debugf("yolo push could not be parsed: %v (xml=%q)", err, msg.XML)
-				return
+			case changed:
+				report(state)
 			}
-			if res.hasEvent {
-				c.alarmPushed.Store(true)
-			}
-			// a basic push lists every channel still detecting, a detailed one only the channels it names
-			if !res.matched && !basic {
-				return
-			}
-			if slices.Equal(*current, res.state.AITypes) {
-				return
-			}
-			*current = res.state.AITypes
-			report()
 		}
 
 		for {
@@ -218,8 +215,7 @@ func (c *Client) ListenForAlarms(ctx context.Context, channel uint8, callback fu
 				case err != nil:
 					c.debugf("alarm push could not be parsed: %v (xml=%q)", err, msg.XML)
 				case res.matched:
-					alarm = res.state
-					report()
+					report(alarms.Alarm(res.state))
 				case res.hasEvent && !c.LoginDeviceInfo().IsNVR():
 					// the camera reports alarms, just not for the channel this
 					// camera was adopted as; silently dropping them looks like
@@ -233,11 +229,11 @@ func (c *Client) ListenForAlarms(ctx context.Context, channel uint8, callback fu
 				}
 			case msg := <-yoloSub:
 				if msg != nil {
-					updateYolo(msg, &yolo, true)
+					updateYolo(msg, msgIDYoloAlarm)
 				}
 			case msg := <-yoloDetailSub:
 				if msg != nil {
-					updateYolo(msg, &yoloDetail, false)
+					updateYolo(msg, msgIDYoloAlarmDetail)
 				}
 			}
 		}
@@ -249,6 +245,49 @@ func (c *Client) ListenForAlarms(ctx context.Context, channel uint8, callback fu
 			close(stop)
 		})
 	}, nil
+}
+
+// Alarm takes the decoded alarm push of the channel and returns the merged state.
+func (m *AlarmMerger) Alarm(state AlarmState) AlarmState {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.alarm = state
+	return m.state()
+}
+
+// Yolo takes a YOLO World push (cmd 600 or 696) and returns the merged state, changed is false when the push leaves the channel as it was.
+func (m *AlarmMerger) Yolo(cmd int, xmlText string, channel uint8, anyChannel bool) (state AlarmState, changed bool, err error) {
+	types, matched, err := parseYolo(xmlText, channel, anyChannel)
+	if err != nil {
+		return AlarmState{}, false, err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current := &m.yolo
+	// a basic push lists every channel still detecting, a detailed one only the channels it names
+	if cmd == msgIDYoloAlarmDetail {
+		if !matched {
+			return m.state(), false, nil
+		}
+		current = &m.yoloDetail
+	}
+	if slices.Equal(*current, types) {
+		return m.state(), false, nil
+	}
+	*current = types
+	return m.state(), true, nil
+}
+
+// Reset forgets every push, for a camera that went to sleep without ending its events.
+func (m *AlarmMerger) Reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.alarm, m.yolo, m.yoloDetail = AlarmState{}, nil, nil
+}
+
+func (m *AlarmMerger) state() AlarmState {
+	return withAITypes(m.alarm, m.yolo, m.yoloDetail)
 }
 
 // alarmParse is what one alarm push decoded to. hasEvent separates a real
@@ -322,36 +361,30 @@ func parseAlarm(xmlText string, channel uint8, anyChannel bool) (alarmParse, err
 	return res, nil
 }
 
-func parseYolo(xmlText string, channel uint8, anyChannel bool) (alarmParse, error) {
+func parseYolo(xmlText string, channel uint8, anyChannel bool) (types []string, matched bool, err error) {
 	if xmlText == "" {
-		return alarmParse{}, nil
+		return nil, false, nil
 	}
 
 	var payload yoloMessage
 	if err := xml.Unmarshal([]byte(xmlText), &payload); err != nil {
-		return alarmParse{}, err
+		return nil, false, err
 	}
 
-	var res alarmParse
 	for _, list := range payload.Lists {
 		for _, ev := range list.Events {
-			if ev.Channel == nil {
+			if ev.Channel == nil || (!anyChannel && *ev.Channel != channel) {
 				continue
 			}
-			res.hasEvent = true
-			res.channels = appendNew(res.channels, *ev.Channel)
-			if !anyChannel && *ev.Channel != channel {
-				continue
-			}
-			res.matched = true
+			matched = true
 			for _, t := range ev.Types {
 				if aiType := yoloAIType(t.Type); aiType != "" {
-					res.state.AITypes = appendNew(res.state.AITypes, aiType)
+					types = appendNew(types, aiType)
 				}
 			}
 		}
 	}
-	return res, nil
+	return types, matched, nil
 }
 
 // yoloAIType names a YOLO World class the way the alarm push names its AI types.

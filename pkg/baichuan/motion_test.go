@@ -361,16 +361,16 @@ func TestParseYoloMapsClassesToAITypes(t *testing.T) {
 </YoloWorldEventList>
 </body>`
 
-	res, err := parseYolo(xmlText, 0, false)
+	types, matched, err := parseYolo(xmlText, 0, false)
 	if err != nil {
 		t.Fatalf("parseYolo() error: %v", err)
 	}
-	if !res.matched || !res.hasEvent {
-		t.Fatalf("parseYolo() matched=%t hasEvent=%t, want both", res.matched, res.hasEvent)
+	if !matched {
+		t.Fatal("parseYolo() did not match channel 0")
 	}
 	want := []string{"people", "vehicle", "non-motor vehicle", "dog_cat", "package"}
-	if !slices.Equal(res.state.AITypes, want) {
-		t.Fatalf("aiTypes = %v, want %v", res.state.AITypes, want)
+	if !slices.Equal(types, want) {
+		t.Fatalf("aiTypes = %v, want %v", types, want)
 	}
 }
 
@@ -379,23 +379,20 @@ func TestParseYoloIgnoresOtherChannels(t *testing.T) {
 
 	xmlText := `<body><list><event><channel>2</channel><YoloWorldType><type>person</type></YoloWorldType></event></list></body>`
 
-	res, err := parseYolo(xmlText, 0, false)
+	types, matched, err := parseYolo(xmlText, 0, false)
 	if err != nil {
 		t.Fatalf("parseYolo() error: %v", err)
 	}
-	if res.matched || len(res.state.AITypes) != 0 {
-		t.Fatalf("an event for channel 2 matched channel 0: %+v", res)
-	}
-	if !res.hasEvent || !slices.Equal(res.channels, []uint8{2}) {
-		t.Fatalf("hasEvent=%t channels=%v, want true [2]", res.hasEvent, res.channels)
+	if matched || len(types) != 0 {
+		t.Fatalf("an event for channel 2 matched channel 0: %v", types)
 	}
 
-	res, err = parseYolo(xmlText, 0, true)
+	types, matched, err = parseYolo(xmlText, 0, true)
 	if err != nil {
 		t.Fatalf("parseYolo() error: %v", err)
 	}
-	if !res.matched || !slices.Equal(res.state.AITypes, []string{"people"}) {
-		t.Fatalf("a dual-lens camera must take every channel: %+v", res)
+	if !matched || !slices.Equal(types, []string{"people"}) {
+		t.Fatalf("a dual-lens camera must take every channel: %v", types)
 	}
 }
 
@@ -404,24 +401,80 @@ func TestParseYoloDetailWithSubTypes(t *testing.T) {
 
 	xmlText := `<body><list><event><channel>0</channel><YoloWorldType><type>motor vehicle</type><subTypeList><subType>sedan</subType></subTypeList><subTypeList><subType>pickup truck</subType></subTypeList></YoloWorldType></event></list></body>`
 
-	res, err := parseYolo(xmlText, 0, false)
+	types, _, err := parseYolo(xmlText, 0, false)
 	if err != nil {
 		t.Fatalf("parseYolo() error: %v", err)
 	}
-	if !slices.Equal(res.state.AITypes, []string{"vehicle"}) {
-		t.Fatalf("aiTypes = %v, want [vehicle]", res.state.AITypes)
+	if !slices.Equal(types, []string{"vehicle"}) {
+		t.Fatalf("aiTypes = %v, want [vehicle]", types)
 	}
 }
 
 func TestParseYoloSkipsEventsWithoutChannel(t *testing.T) {
 	t.Parallel()
 
-	res, err := parseYolo(`<body><list><event><YoloWorldType><type>person</type></YoloWorldType></event></list></body>`, 0, false)
+	types, matched, err := parseYolo(`<body><list><event><YoloWorldType><type>person</type></YoloWorldType></event></list></body>`, 0, false)
 	if err != nil {
 		t.Fatalf("parseYolo() error: %v", err)
 	}
-	if res.hasEvent || res.matched {
-		t.Fatalf("an event without channel counted: %+v", res)
+	if matched || len(types) != 0 {
+		t.Fatalf("an event without channel counted: %v", types)
+	}
+}
+
+func TestAlarmMergerBasicPushIsASnapshot(t *testing.T) {
+	t.Parallel()
+
+	var m AlarmMerger
+	m.Alarm(AlarmState{MotionDetected: true})
+
+	state, changed, err := m.Yolo(msgIDYoloAlarm, `<body><list><event><channel>0</channel><YoloWorldType><type>person</type></YoloWorldType></event></list></body>`, 0, false)
+	if err != nil || !changed {
+		t.Fatalf("Yolo() changed=%t err=%v, want a change", changed, err)
+	}
+	if !state.MotionDetected || !slices.Equal(state.AITypes, []string{"people"}) {
+		t.Fatalf("merged state = %+v, want motion and people", state)
+	}
+
+	// a basic push that leaves our channel out ends its detections
+	state, changed, err = m.Yolo(msgIDYoloAlarm, `<body><list><event><channel>1</channel><YoloWorldType><type>person</type></YoloWorldType></event></list></body>`, 0, false)
+	if err != nil || !changed {
+		t.Fatalf("Yolo() changed=%t err=%v, want a change", changed, err)
+	}
+	if !state.MotionDetected || len(state.AITypes) != 0 {
+		t.Fatalf("merged state = %+v, want motion only", state)
+	}
+}
+
+func TestAlarmMergerDetailedPushOnlyTouchesItsChannels(t *testing.T) {
+	t.Parallel()
+
+	var m AlarmMerger
+	push := `<body><list><event><channel>0</channel><YoloWorldType><type>motor vehicle</type></YoloWorldType></event></list></body>`
+	if _, changed, err := m.Yolo(msgIDYoloAlarmDetail, push, 0, false); err != nil || !changed {
+		t.Fatalf("Yolo() changed=%t err=%v, want a change", changed, err)
+	}
+	if _, changed, _ := m.Yolo(msgIDYoloAlarmDetail, push, 0, false); changed {
+		t.Fatal("the same push twice reported a change")
+	}
+
+	state, changed, err := m.Yolo(msgIDYoloAlarmDetail, `<body><list><event><channel>1</channel></event></list></body>`, 0, false)
+	if err != nil || changed {
+		t.Fatalf("a detailed push for channel 1 changed channel 0: changed=%t err=%v", changed, err)
+	}
+	if !slices.Equal(state.AITypes, []string{"vehicle"}) {
+		t.Fatalf("aiTypes = %v, want [vehicle]", state.AITypes)
+	}
+
+	// a new alarm push keeps the yolo detections
+	state = m.Alarm(AlarmState{Visitor: true})
+	if !state.Visitor || !slices.Equal(state.AITypes, []string{"vehicle"}) {
+		t.Fatalf("merged state = %+v, want visitor and vehicle", state)
+	}
+
+	m.Reset()
+	if state = m.Alarm(AlarmState{}); state.Active() || state.Visitor {
+		t.Fatalf("state after Reset = %+v, want nothing", state)
 	}
 }
 

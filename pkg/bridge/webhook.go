@@ -132,11 +132,20 @@ func (c *Camera) handleWebhookPush(body []byte) {
 	c.device.notePush()
 
 	channel := uint8(c.cfg.Channel) //#nosec G115
+	dualLens := channel == 0 && c.device.DualLens()
 
 	if push.XML != "" {
 		switch push.Cmd {
 		case 33:
-			if state, matched, err := baichuan.ParseAlarmStateXML(push.XML, channel, channel == 0 && c.device.DualLens()); err == nil && matched {
+			if state, matched, err := baichuan.ParseAlarmStateXML(push.XML, channel, dualLens); err == nil && matched {
+				c.handleAlarm(c.webhookAlarms.Alarm(state))
+			}
+		case 600, 696:
+			state, changed, err := c.webhookAlarms.Yolo(push.Cmd, push.XML, channel, dualLens)
+			switch {
+			case err != nil:
+				c.bridge.log.Debugf("camera %s webhook: yolo push could not be parsed: %v", c.cfg.Name, err)
+			case changed:
 				c.handleAlarm(state)
 			}
 		case 252, 253:
@@ -164,14 +173,15 @@ func (c *Camera) handleWebhookPush(body []byte) {
 	case "sleep":
 		c.handleSleep(true)
 		// a battery camera pushes no end of its events, so its sleep ends them and re-arms the doorbell
+		c.webhookAlarms.Reset()
 		c.handleAlarm(baichuan.AlarmState{})
 	case "wake":
 		c.handleSleep(false)
 		switch push.Data["reason"] {
 		case "doorbell":
-			c.handleAlarm(baichuan.AlarmState{Visitor: true})
+			c.handleAlarm(c.webhookAlarms.Alarm(baichuan.AlarmState{Visitor: true}))
 		case "pir":
-			c.handleAlarm(baichuan.AlarmState{MotionDetected: true})
+			c.handleAlarm(c.webhookAlarms.Alarm(baichuan.AlarmState{MotionDetected: true}))
 		}
 	case "test":
 	default:
