@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -154,8 +155,11 @@ func decodeChannelCapabilities(item xmlSupportItem, deviceTalk bool) ChannelCapa
 		{3, "face"},
 		{4, "dog_cat"},
 		{17, "package"},
+		// YOLO World
+		{23, "package"},
+		{23, "non-motor vehicle"},
 	} {
-		if (item.AIType>>ai.bit)&1 == 1 {
+		if (item.AIType>>ai.bit)&1 == 1 && !slices.Contains(caps.AITypes, ai.name) {
 			caps.AITypes = append(caps.AITypes, ai.name)
 		}
 	}

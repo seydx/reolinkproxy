@@ -382,7 +382,8 @@ func (c *Client) keepAliveLoop() {
 
 	const pingTimeout = 4 * time.Second
 
-	interval := 30 * time.Second
+	// some wifi cameras close a connection after 12 s without traffic
+	interval := 9 * time.Second
 	if c.isUDP {
 		interval = 500 * time.Millisecond
 	}

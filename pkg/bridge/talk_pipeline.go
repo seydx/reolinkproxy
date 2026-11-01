@@ -184,10 +184,7 @@ func applyTalkVolume(pcm []int16, percent int) {
 	}
 
 	for i, sample := range pcm {
-		scaled := min(int64(sample)*int64(percent)/100, 32767)
-		if scaled < -32768 {
-			scaled = -32768
-		}
+		scaled := max(min(int64(sample)*int64(percent)/100, 32767), -32768)
 		pcm[i] = int16(scaled)
 	}
 }

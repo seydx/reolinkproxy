@@ -31,6 +31,8 @@ const (
 	msgIDTalkReset                = 11
 	msgIDMotionRequest            = 31
 	msgIDMotion                   = 33
+	msgIDYoloAlarm                = 600
+	msgIDYoloAlarmDetail          = 696
 	msgIDGetPorts                 = 37
 	msgIDPing                     = 93
 	msgIDAbilityInfo              = 151

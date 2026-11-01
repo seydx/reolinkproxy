@@ -45,6 +45,24 @@ type AlarmMessage struct {
 	Lists []AlarmEventList `xml:",any"`
 }
 
+// the wrapper names of a yolo push are unknown, reolink_aio walks them blind too
+type yoloMessage struct {
+	Lists []yoloEventList `xml:",any"`
+}
+
+type yoloEventList struct {
+	Events []yoloEvent `xml:",any"`
+}
+
+type yoloEvent struct {
+	Channel *uint8     `xml:"channel"`
+	Types   []yoloType `xml:"YoloWorldType"`
+}
+
+type yoloType struct {
+	Type string `xml:"type"`
+}
+
 // AlarmState is one decoded alarm update for a channel. Field semantics
 // follow reolink_aio: motion is the "MD" status (or the unclassified "other"
 // AI type on PIR-style cameras), a doorbell press arrives as the "visitor"
@@ -139,10 +157,42 @@ func (c *Client) ListenForAlarms(ctx context.Context, channel uint8, callback fu
 	dualLens := channel == 0 && c.LoginDeviceInfo().IsDualLens()
 
 	motionSub, unsubscribeMotion := c.Subscribe(msgIDMotion)
+	yoloSub, unsubscribeYolo := c.Subscribe(msgIDYoloAlarm)
+	yoloDetailSub, unsubscribeYoloDetail := c.Subscribe(msgIDYoloAlarmDetail)
 	stop := make(chan struct{})
 
 	go func() {
 		defer unsubscribeMotion()
+		defer unsubscribeYolo()
+		defer unsubscribeYoloDetail()
+
+		// cameras with YOLO World report people, vehicles and bicycles apart from the alarm push
+		var alarm AlarmState
+		var yolo, yoloDetail []string
+		report := func() {
+			state := withAITypes(alarm, yolo, yoloDetail)
+			c.debugf("alarm push channel %d: motion=%t visitor=%t ai=%v", channel, state.MotionDetected, state.Visitor, state.AITypes)
+			callback(state)
+		}
+		updateYolo := func(msg *Message, current *[]string, basic bool) {
+			res, err := parseYolo(msg.XML, channel, dualLens)
+			if err != nil {
+				c.debugf("yolo push could not be parsed: %v (xml=%q)", err, msg.XML)
+				return
+			}
+			if res.hasEvent {
+				c.alarmPushed.Store(true)
+			}
+			// a basic push lists every channel still detecting, a detailed one only the channels it names
+			if !res.matched && !basic {
+				return
+			}
+			if slices.Equal(*current, res.state.AITypes) {
+				return
+			}
+			*current = res.state.AITypes
+			report()
+		}
 
 		for {
 			select {
@@ -168,8 +218,8 @@ func (c *Client) ListenForAlarms(ctx context.Context, channel uint8, callback fu
 				case err != nil:
 					c.debugf("alarm push could not be parsed: %v (xml=%q)", err, msg.XML)
 				case res.matched:
-					c.debugf("alarm push channel %d: motion=%t visitor=%t ai=%v", channel, res.state.MotionDetected, res.state.Visitor, res.state.AITypes)
-					callback(res.state)
+					alarm = res.state
+					report()
 				case res.hasEvent && !c.LoginDeviceInfo().IsNVR():
 					// the camera reports alarms, just not for the channel this
 					// camera was adopted as; silently dropping them looks like
@@ -180,6 +230,14 @@ func (c *Client) ListenForAlarms(ctx context.Context, channel uint8, callback fu
 					})
 				default:
 					c.debugf("ignored %s push for channel %d", pushListName(msg.XML), channel)
+				}
+			case msg := <-yoloSub:
+				if msg != nil {
+					updateYolo(msg, &yolo, true)
+				}
+			case msg := <-yoloDetailSub:
+				if msg != nil {
+					updateYolo(msg, &yoloDetail, false)
 				}
 			}
 		}
@@ -224,9 +282,7 @@ func parseAlarm(xmlText string, channel uint8, anyChannel bool) (alarmParse, err
 	for _, list := range payload.Lists {
 		for _, ev := range list.AlarmEvents {
 			res.hasEvent = true
-			if !slices.Contains(res.channels, ev.ChannelID) {
-				res.channels = append(res.channels, ev.ChannelID)
-			}
+			res.channels = appendNew(res.channels, ev.ChannelID)
 			if !anyChannel && ev.ChannelID != channel {
 				continue
 			}
@@ -242,11 +298,7 @@ func parseAlarm(xmlText string, channel uint8, anyChannel bool) (alarmParse, err
 			if strings.Contains(ev.AIType, "other") {
 				state.MotionDetected = true
 			}
-			for _, aiType := range parseAITypes(ev.AIType) {
-				if !slices.Contains(state.AITypes, aiType) {
-					state.AITypes = append(state.AITypes, aiType)
-				}
-			}
+			state.AITypes = appendNew(state.AITypes, parseAITypes(ev.AIType)...)
 			// zone-based smart detections (crossline, intrusion, linger) may
 			// fire without an MD status or plain AItype
 			for _, smart := range ev.SmartAI {
@@ -261,17 +313,76 @@ func parseAlarm(xmlText string, channel uint8, anyChannel bool) (alarmParse, err
 						state.MotionDetected = true
 						continue
 					}
-					for _, aiType := range types {
-						if !slices.Contains(state.AITypes, aiType) {
-							state.AITypes = append(state.AITypes, aiType)
-						}
-					}
+					state.AITypes = appendNew(state.AITypes, types...)
 				}
 			}
 		}
 	}
 
 	return res, nil
+}
+
+func parseYolo(xmlText string, channel uint8, anyChannel bool) (alarmParse, error) {
+	if xmlText == "" {
+		return alarmParse{}, nil
+	}
+
+	var payload yoloMessage
+	if err := xml.Unmarshal([]byte(xmlText), &payload); err != nil {
+		return alarmParse{}, err
+	}
+
+	var res alarmParse
+	for _, list := range payload.Lists {
+		for _, ev := range list.Events {
+			if ev.Channel == nil {
+				continue
+			}
+			res.hasEvent = true
+			res.channels = appendNew(res.channels, *ev.Channel)
+			if !anyChannel && *ev.Channel != channel {
+				continue
+			}
+			res.matched = true
+			for _, t := range ev.Types {
+				if aiType := yoloAIType(t.Type); aiType != "" {
+					res.state.AITypes = appendNew(res.state.AITypes, aiType)
+				}
+			}
+		}
+	}
+	return res, nil
+}
+
+// yoloAIType names a YOLO World class the way the alarm push names its AI types.
+func yoloAIType(raw string) string {
+	switch name := strings.ToLower(strings.TrimSpace(raw)); name {
+	case "person":
+		return "people"
+	case "motor vehicle":
+		return "vehicle"
+	case "animal":
+		return "dog_cat"
+	default:
+		return name
+	}
+}
+
+func withAITypes(state AlarmState, more ...[]string) AlarmState {
+	state.AITypes = slices.Clone(state.AITypes)
+	for _, types := range more {
+		state.AITypes = appendNew(state.AITypes, types...)
+	}
+	return state
+}
+
+func appendNew[T comparable](list []T, items ...T) []T {
+	for _, item := range items {
+		if !slices.Contains(list, item) {
+			list = append(list, item)
+		}
+	}
+	return list
 }
 
 // pushListName returns the list element below <body> so an ignored push can be
