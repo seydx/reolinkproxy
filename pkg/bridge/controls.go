@@ -114,6 +114,60 @@ func (c *Camera) Capabilities(ctx context.Context) (baichuan.ChannelCapabilities
 	return caps, err
 }
 
+// Chimes lists the chimes paired with this doorbell.
+func (c *Camera) Chimes(ctx context.Context) ([]baichuan.Chime, error) {
+	var chimes []baichuan.Chime
+	err := c.device.WithClient(ctx, func(client *baichuan.Client) error {
+		var err error
+		chimes, err = client.Chimes(ctx, c.channel())
+		return err
+	})
+	return chimes, err
+}
+
+// ChimeVisitorTones returns the tone each chime plays for a doorbell press,
+// -1 for a chime that stays silent on it.
+func (c *Camera) ChimeVisitorTones(ctx context.Context) (map[int]int, error) {
+	var tones map[int]int
+	err := c.device.WithClient(ctx, func(client *baichuan.Client) error {
+		var err error
+		tones, err = client.ChimeTones(ctx, c.channel(), "visitor")
+		return err
+	})
+	return tones, err
+}
+
+// ChimeParams reads a chime's name, volume (0-4) and LED state.
+func (c *Camera) ChimeParams(ctx context.Context, chimeID int) (baichuan.ChimeParams, error) {
+	var params baichuan.ChimeParams
+	err := c.device.WithClient(ctx, func(client *baichuan.Client) error {
+		var err error
+		params, err = client.ChimeParams(ctx, c.channel(), chimeID)
+		return err
+	})
+	return params, err
+}
+
+// SetChimeVolume sets a chime's volume (0-4) and keeps its name and LED state.
+func (c *Camera) SetChimeVolume(ctx context.Context, chimeID int, volume int) error {
+	return c.device.WithClient(ctx, func(client *baichuan.Client) error {
+		// the camera only takes the name, volume and LED state together
+		params, err := client.ChimeParams(ctx, c.channel(), chimeID)
+		if err != nil {
+			return err
+		}
+		params.Volume = volume
+		return client.SetChimeParams(ctx, c.channel(), chimeID, params)
+	})
+}
+
+// RingChime plays one of the chime's tones (0-9) once.
+func (c *Camera) RingChime(ctx context.Context, chimeID int, tone int) error {
+	return c.device.WithClient(ctx, func(client *baichuan.Client) error {
+		return client.RingChime(ctx, c.channel(), chimeID, tone)
+	})
+}
+
 func (c *Camera) channel() uint8 {
 	return uint8(c.cfg.Channel) //#nosec G115
 }

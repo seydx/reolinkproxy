@@ -494,3 +494,17 @@ func TestWithAITypesMergesWithoutDuplicates(t *testing.T) {
 		t.Fatalf("the merge changed the alarm state it started from: %v", alarm.AITypes)
 	}
 }
+
+func TestParseAlarmStateTamper(t *testing.T) {
+	t.Parallel()
+
+	xmlText := `<?xml version="1.0" encoding="utf-8"?><body><AlarmEventList><AlarmEvent><channelId>0</channelId><status>MD,tamper</status><AItype>none</AItype></AlarmEvent></AlarmEventList></body>`
+
+	state, matched, err := parseAlarmState(xmlText, 0, false)
+	if err != nil || !matched {
+		t.Fatalf("parseAlarmState() matched = %t, error = %v", matched, err)
+	}
+	if !state.Tamper || !state.MotionDetected {
+		t.Fatalf("tamper = %t, motion = %t, want both", state.Tamper, state.MotionDetected)
+	}
+}

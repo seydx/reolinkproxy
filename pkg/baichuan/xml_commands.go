@@ -50,21 +50,6 @@ type xmlAutoFocus struct {
 	Disable   int    `xml:"disable"`
 }
 
-type xmlDingDongOptBody struct {
-	XMLName           xml.Name       `xml:"body"`
-	DingdongDeviceOpt xmlDingDongOpt `xml:"dingdongDeviceOpt"`
-}
-
-type xmlDingDongOpt struct {
-	Version  string `xml:"version,attr,omitempty"`
-	Opt      string `xml:"opt"`
-	ID       int    `xml:"id"`
-	VolLevel int    `xml:"volLevel,omitempty"`
-	LedState int    `xml:"ledState,omitempty"`
-	Name     string `xml:"name,omitempty"`
-	MusicID  int    `xml:"musicId,omitempty"`
-}
-
 type xmlDingDongSilentBody struct {
 	XMLName            xml.Name              `xml:"body"`
 	DingdongSilentMode xmlDingDongSilentMode `xml:"dingdongSilentMode"`

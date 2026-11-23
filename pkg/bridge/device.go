@@ -19,8 +19,8 @@ const uidReprobeInterval = 5 * time.Minute
 const uidLoginTimeout = 30 * time.Second
 
 const (
-	previewRejectedPauseMin = 2 * time.Second
-	previewRejectedPauseMax = time.Minute
+	minPreviewRejectedPause = 2 * time.Second
+	maxPreviewRejectedPause = time.Minute
 )
 
 // a camera has one talk slot, a restart per audio block would keep it busy for every client
@@ -373,7 +373,7 @@ func (m *cameraDevice) StreamPackets(ctx context.Context, channel uint8, stream 
 					if rejectedPause == 0 && statusErr.Code != 425 {
 						m.log.Warnf("stream %s channel %d rejected by camera (%v), retrying", m.cameraName, channel, err)
 					}
-					rejectedPause = min(max(2*rejectedPause, previewRejectedPauseMin), previewRejectedPauseMax)
+					rejectedPause = min(max(2*rejectedPause, minPreviewRejectedPause), maxPreviewRejectedPause)
 					select {
 					case <-ctx.Done():
 						return

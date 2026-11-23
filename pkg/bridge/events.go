@@ -40,12 +40,14 @@ type cameraEvents struct {
 	onConnection func(connected bool)
 	onSleep      func(sleeping bool)
 	onFloodlight func(on bool)
+	onTamper     func(tampered bool)
 	onAudioHint  func(profile string, hint AudioHint)
 
 	lastVisitor    bool
 	lastMotion     *MotionEvent
 	lastSleep      *bool
 	lastFloodlight *bool
+	lastTamper     *bool
 	lastAudioHint  map[string]AudioHint
 	lastConnection *bool
 }
@@ -128,6 +130,14 @@ func (c *Camera) OnFloodlight(fn func(on bool)) {
 	c.events.onFloodlight = fn
 }
 
+// OnTamper registers the handler invoked when the camera starts (true) or
+// stops (false) reporting tampering.
+func (c *Camera) OnTamper(fn func(tampered bool)) {
+	c.events.mu.Lock()
+	defer c.events.mu.Unlock()
+	c.events.onTamper = fn
+}
+
 // handleFloodlight dispatches deduplicated spotlight-state changes.
 func (c *Camera) handleFloodlight(on bool) {
 	c.events.mu.Lock()
@@ -166,12 +176,15 @@ func (c *Camera) handleAlarm(state baichuan.AlarmState) {
 	c.events.mu.Lock()
 	fireDoorbell := state.Visitor && !c.events.lastVisitor
 	c.events.lastVisitor = state.Visitor
+	fireTamper := c.events.lastTamper == nil || *c.events.lastTamper != state.Tamper
+	c.events.lastTamper = &state.Tamper
 	fireMotion := c.events.lastMotion == nil ||
 		c.events.lastMotion.Active != event.Active ||
 		!slices.Equal(c.events.lastMotion.AITypes, event.AITypes)
 	c.events.lastMotion = &event
 	onDoorbell := c.events.onDoorbell
 	onMotion := c.events.onMotion
+	onTamper := c.events.onTamper
 	c.events.mu.Unlock()
 
 	if c.motion != nil {
@@ -179,6 +192,9 @@ func (c *Camera) handleAlarm(state baichuan.AlarmState) {
 	}
 	if fireDoorbell && onDoorbell != nil {
 		onDoorbell()
+	}
+	if fireTamper && onTamper != nil {
+		onTamper(state.Tamper)
 	}
 	if fireMotion && onMotion != nil {
 		onMotion(event)

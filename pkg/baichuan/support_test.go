@@ -25,3 +25,16 @@ func TestDecodeChannelCapabilitiesYoloWorld(t *testing.T) {
 		t.Fatalf("aiTypes = %v, want %v", caps.AITypes, want)
 	}
 }
+
+func TestDecodeChannelCapabilitiesChimeAndTamper(t *testing.T) {
+	t.Parallel()
+
+	caps := decodeChannelCapabilities(xmlSupportItem{DoorbellVersion: 1, AIType: 1 << 25}, false)
+	if !caps.Chime || !caps.Tamper {
+		t.Fatalf("chime = %t, tamper = %t, want both", caps.Chime, caps.Tamper)
+	}
+	caps = decodeChannelCapabilities(xmlSupportItem{DoorbellVersion: 2, AIType: 1 << 24}, false)
+	if caps.Chime || caps.Tamper {
+		t.Fatalf("chime = %t, tamper = %t, want neither", caps.Chime, caps.Tamper)
+	}
+}

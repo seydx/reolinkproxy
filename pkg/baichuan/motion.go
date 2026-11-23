@@ -72,6 +72,8 @@ type AlarmState struct {
 	MotionDetected bool
 	// Visitor is true while a doorbell press is active.
 	Visitor bool
+	// Tamper is true while the camera reports tampering.
+	Tamper bool
 	// AITypes lists the active AI classifications, e.g. "people", "vehicle"
 	// or "dog_cat". Empty when none are active.
 	AITypes []string
@@ -176,7 +178,7 @@ func (c *Client) ListenForAlarms(ctx context.Context, channel uint8, callback fu
 
 		var alarms AlarmMerger
 		report := func(state AlarmState) {
-			c.debugf("alarm push channel %d: motion=%t visitor=%t ai=%v", channel, state.MotionDetected, state.Visitor, state.AITypes)
+			c.debugf("alarm push channel %d: motion=%t visitor=%t tamper=%t ai=%v", channel, state.MotionDetected, state.Visitor, state.Tamper, state.AITypes)
 			callback(state)
 		}
 		updateYolo := func(msg *Message, cmd int) {
@@ -331,6 +333,9 @@ func parseAlarm(xmlText string, channel uint8, anyChannel bool) (alarmParse, err
 			}
 			if strings.Contains(ev.Status, "visitor") {
 				state.Visitor = true
+			}
+			if strings.Contains(ev.Status, "tamper") {
+				state.Tamper = true
 			}
 			// PIR-style cameras report unclassified detections as AI type
 			// "other" instead of an MD status.

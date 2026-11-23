@@ -122,19 +122,6 @@ func (c *Client) GetAutoFocus(ctx context.Context, channel uint8) (*Message, err
 	return c.execCommand(ctx, msgIDAutoFocusGet, channel, nil)
 }
 
-// RingChimeWithTone rings the chime using a specific tone
-func (c *Client) RingChimeWithTone(ctx context.Context, channel uint8, chimeID int, toneID int) error {
-	_, err := c.execCommand(ctx, msgIDDingDongOpt2, channel, xmlDingDongOptBody{
-		DingdongDeviceOpt: xmlDingDongOpt{Version: "1.1", Opt: "ringWithMusic", ID: chimeID, MusicID: toneID},
-	})
-	return err
-}
-
-// GetChimeConfig retrieves the configuration of a paired chime
-func (c *Client) GetChimeConfig(ctx context.Context, channel uint8) (*Message, error) {
-	return c.execCommand(ctx, msgIDDingDongGet, channel, nil)
-}
-
 // SetChimeSilentMode sets the silent mode (DND) on the chime for a specific duration (in minutes)
 func (c *Client) SetChimeSilentMode(ctx context.Context, channel uint8, chimeID int, time int) error {
 	_, err := c.execCommand(ctx, msgIDDingDongSilentSet, channel, xmlDingDongSilentBody{

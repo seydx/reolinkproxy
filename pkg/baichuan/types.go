@@ -65,9 +65,9 @@ const (
 	msgIDAiAlarmGet               = 342
 	msgIDAiAlarmSet               = 343
 	msgIDQuickReplyPlay           = 349
-	msgIDDingDongOpt1             = 484
-	msgIDDingDongOpt2             = 485
-	msgIDDingDongGet              = 486
+	msgIDDingDongList             = 484
+	msgIDDingDongOpt              = 485
+	msgIDDingDongCfg              = 486
 	msgIDDingDongSet              = 487
 	msgIDPrivacyModeGet           = 574
 	msgIDPrivacyModeSet           = 575
