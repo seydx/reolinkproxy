@@ -24,6 +24,8 @@ const (
 // MediaParser incrementally parses the bcmedia byte stream carried by msg_id=3.
 type MediaParser struct {
 	buf bytes.Buffer
+	// some cameras name the wrong codec in the frame header (Argus 4 Pro main stream), the keyframe's parameter sets decide
+	videoCodec string
 }
 
 // Append adds bytes to the parser and returns every complete media packet found.
@@ -43,7 +45,48 @@ func (p *MediaParser) Append(data []byte) ([]MediaPacket, error) {
 		}
 
 		p.buf.Next(consumed)
+		p.correctVideoCodec(&packet)
 		out = append(out, packet)
+	}
+}
+
+func (p *MediaParser) correctVideoCodec(packet *MediaPacket) {
+	switch packet.Kind {
+	case MediaPacketIFrame:
+		if codec := videoCodecFromParameterSets(packet.Data); codec != "" {
+			p.videoCodec = codec
+		}
+	case MediaPacketPFrame:
+	default:
+		return
+	}
+	if p.videoCodec != "" {
+		packet.Codec = p.videoCodec
+	}
+}
+
+func videoCodecFromParameterSets(frame []byte) string {
+	// the first byte of an H.264 SPS and an H.265 VPS or SPS cannot be mistaken for each other
+	startCode := []byte{0, 0, 1}
+	for pos := 0; ; {
+		i := bytes.Index(frame[pos:], startCode)
+		if i < 0 {
+			return ""
+		}
+		pos += i + len(startCode)
+		if pos >= len(frame) {
+			return ""
+		}
+		nal := frame[pos]
+		if nal&0x80 != 0 {
+			continue
+		}
+		if t := (nal >> 1) & 0x3F; t == 32 || t == 33 {
+			return "H265"
+		}
+		if nal&0x1F == 7 {
+			return "H264"
+		}
 	}
 }
 

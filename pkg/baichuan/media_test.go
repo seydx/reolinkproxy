@@ -3,6 +3,7 @@ package baichuan
 import (
 	"bytes"
 	"encoding/binary"
+	"slices"
 	"testing"
 	"time"
 )
@@ -158,5 +159,54 @@ func TestMediaParserADPCMNoTimestamp(t *testing.T) {
 	}
 	if !bytes.Equal(packets[0].Data, payload) {
 		t.Fatalf("packet.Data = %v, want %v", packets[0].Data, payload)
+	}
+}
+
+func TestMediaParserCodecFromKeyframe(t *testing.T) {
+	t.Parallel()
+
+	frame := func(magic uint32, codec string, data []byte) []byte {
+		raw := new(bytes.Buffer)
+		for _, v := range []any{magic, []byte(codec), uint32(len(data)), uint32(0), uint32(1), uint32(0)} {
+			if err := binary.Write(raw, binary.LittleEndian, v); err != nil {
+				t.Fatal(err)
+			}
+		}
+		raw.Write(data)
+		raw.Write(make([]byte, padLen(len(data))))
+		return raw.Bytes()
+	}
+	h265Key := []byte{0, 0, 0, 1, 0x46, 0x01, 0x50, 0, 0, 0, 1, 0x40, 0x01, 0x0c, 0, 0, 1, 0x42, 0x01}
+	h264Key := []byte{0, 0, 0, 1, 0x09, 0xf0, 0, 0, 0, 1, 0x27, 0x64, 0x00, 0x33}
+	slice := []byte{0, 0, 0, 1, 0x41, 0x9a}
+
+	tests := []struct {
+		name   string
+		frames [][]byte
+		want   []string
+	}{
+		{"header says H264, keyframe carries H265", [][]byte{frame(bcmediaIFrameMin, "H264", h265Key), frame(bcmediaPFrameMin, "H264", slice)}, []string{"H265", "H265"}},
+		{"header says H265, keyframe carries H264", [][]byte{frame(bcmediaIFrameMin, "H265", h264Key), frame(bcmediaPFrameMin, "H265", slice)}, []string{"H264", "H264"}},
+		{"keyframe without parameter sets keeps the header", [][]byte{frame(bcmediaIFrameMin, "H265", slice)}, []string{"H265"}},
+		{"codec switch follows the next keyframe", [][]byte{frame(bcmediaIFrameMin, "H264", h264Key), frame(bcmediaIFrameMin, "H265", h265Key), frame(bcmediaPFrameMin, "H265", slice)}, []string{"H264", "H265", "H265"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var parser MediaParser
+			var got []string
+			for _, f := range tt.frames {
+				packets, err := parser.Append(f)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, p := range packets {
+					got = append(got, p.Codec)
+				}
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("codecs = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

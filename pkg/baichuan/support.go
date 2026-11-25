@@ -23,7 +23,7 @@ type ChannelCapabilities struct {
 	Battery bool
 	// Doorbell is true when the channel is a video doorbell.
 	Doorbell bool
-	// Chime is true when the doorbell controls paired Reolink chimes.
+	// Chime is true when the doorbell can have paired Reolink chimes.
 	Chime bool
 	// Tamper is true when the camera reports tampering in its alarm pushes.
 	Tamper bool
@@ -121,9 +121,10 @@ func decodeChannelCapabilities(item xmlSupportItem, deviceTalk bool) ChannelCapa
 		PTZ:      item.PTZType != 0,
 		Battery:  item.Battery > 0,
 		Doorbell: item.DoorbellVersion > 0,
-		Chime:    item.DoorbellVersion&1 == 1,
-		Tamper:   (item.AIType>>25)&1 == 1,
-		Motion:   item.Motion > 0,
+		// bit 0 two-way chimes, bit 5 one-way chimes
+		Chime:  item.DoorbellVersion&1 == 1 || (item.DoorbellVersion>>5)&1 == 1,
+		Tamper: (item.AIType>>25)&1 == 1,
+		Motion: item.Motion > 0,
 		// audioVersion bit 2 → siren playback.
 		Siren: (item.AudioVersion>>2)&1 == 1,
 		// ledCtrl bits 1+2 → controllable floodlight.
@@ -137,6 +138,10 @@ func decodeChannelCapabilities(item xmlSupportItem, deviceTalk bool) ChannelCapa
 	// a doorbell behind an NVR or Hub can report doorbellVersion 0 and only name its channel type
 	if strings.EqualFold(item.ChannelType, "doorbell") {
 		caps.Doorbell = true
+		// without the bits only the chime list tells
+		if item.DoorbellVersion == 0 {
+			caps.Chime = true
+		}
 	}
 
 	switch item.PTZType {

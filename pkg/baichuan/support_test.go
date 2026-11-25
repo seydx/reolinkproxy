@@ -37,4 +37,10 @@ func TestDecodeChannelCapabilitiesChimeAndTamper(t *testing.T) {
 	if caps.Chime || caps.Tamper {
 		t.Fatalf("chime = %t, tamper = %t, want neither", caps.Chime, caps.Tamper)
 	}
+	if !decodeChannelCapabilities(xmlSupportItem{DoorbellVersion: 1 << 5}, false).Chime {
+		t.Fatal("a chime that only listens must count")
+	}
+	if !decodeChannelCapabilities(xmlSupportItem{ChannelType: "Doorbell"}, false).Chime {
+		t.Fatal("a doorbell behind an NVR without doorbellVersion must look for chimes")
+	}
 }
